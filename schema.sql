@@ -1,45 +1,45 @@
 CREATE TABLE IF NOT EXISTS works
 (
     -- metadata
-    work_id          UInt32,
-    title            String,
-    authors          Array(String),
+    work_id          UInt32 CODEC(Delta, ZSTD(6)),
+    title            String CODEC(ZSTD(19)),
+    authors          Array(LowCardinality(String)) CODEC(ZSTD(19)),
 
     -- categories & stuff
-    rating           LowCardinality(String),
-    warnings         Array(LowCardinality(String)),
-    category         Array(LowCardinality(String)),
-    language         LowCardinality(String),
-    is_completed     Bool,
+    rating           LowCardinality(String) CODEC(ZSTD(6)),
+    warnings         Array(LowCardinality(String)) CODEC(ZSTD(6)),
+    category         Array(LowCardinality(String)) CODEC(ZSTD(6)),
+    language         LowCardinality(String) CODEC(ZSTD(6)),
+    is_completed     Bool CODEC(ZSTD(6)),
 
     -- tags
-    fandoms          Array(LowCardinality(String)),
-    relationships    Array(String),
-    characters       Array(String),
-    freeform_tags    Array(String),
+    fandoms          Array(LowCardinality(String)) CODEC(ZSTD(6)),
+    relationships    Array(LowCardinality(String)) CODEC(ZSTD(19)),
+    characters       Array(LowCardinality(String)) CODEC(ZSTD(19)),
+    freeform_tags    Array(LowCardinality(String)) CODEC(ZSTD(19)),
 
     -- metrics
-    words            Nullable(UInt32),
-    chapters_count   UInt16,
-    chapters_total   Nullable(UInt16),
+    words            Nullable(UInt32) CODEC(T64, ZSTD(6)),
+    chapters_count   UInt16 CODEC(T64, ZSTD(6)),
+    chapters_total   Nullable(UInt16) CODEC(T64, ZSTD(6)),
 
     -- dates
-    published_date   Date,
-    updated_date     Nullable(Date),
+    published_date   Date CODEC(Delta, ZSTD(6)),
+    updated_date     Nullable(Date) CODEC(Delta, ZSTD(6)),
 
     -- stats
-    kudos            Nullable(UInt32),
-    comments         Nullable(UInt32),
-    bookmarks        Nullable(UInt32),
-    hits             Nullable(UInt32),
+    kudos            Nullable(UInt32) CODEC(T64, ZSTD(6)),
+    comments         Nullable(UInt32) CODEC(T64, ZSTD(6)),
+    bookmarks        Nullable(UInt32) CODEC(T64, ZSTD(6)),
+    hits             Nullable(UInt32) CODEC(T64, ZSTD(6)),
 
     -- series
-    series_names     Array(String),
-    series_indexes   Array(UInt16),
+    series_names     Array(LowCardinality(String)) CODEC(ZSTD(6)),
+    series_indexes   Array(UInt16) CODEC(T64, ZSTD(6)),
 
-    collections      Array(String),
+    collections      Array(LowCardinality(String)) CODEC(ZSTD(6)),
 
-    summary          Nullable(String)
+    summary          Nullable(String) CODEC(ZSTD(19))
 )
 ENGINE = MergeTree
 PRIMARY KEY work_id
