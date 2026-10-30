@@ -1,0 +1,14 @@
+[package]
+name = "parse"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+zip = { version = "2", default-features = false, features = ["deflate"] }
+quick-xml = "0.37"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+scraper = "0.22"
+sirocco = "0.3"
+rayon = "1"
