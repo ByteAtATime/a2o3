@@ -32,19 +32,18 @@ static RE_FILENAME_ID: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)[-_](\d+)\.epub$").unwrap());
 static RE_CHAPTER_FILE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i).*/(?:file|chapter)\d+(?:_u\d+)?\.x?html$").unwrap());
-static RE_USERSTUFF: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?is)<div[^>]*class="userstuff[^"]*"[^>]*>(.*?)</div>\s*(?:<div class="fff_chapter_notes|</body>)"#).unwrap()
+static RE_USERSTUFF_START: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)<div[^>]*class="userstuff[^"]*"[^>]*>"#).unwrap()
 });
 static RE_TITLE_TAG: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)<h[1-6][^>]*class="fff_chapter_title"[^>]*>(.*?)</h[1-6]>"#).unwrap()
 });
 static RE_TITLE_FALLBACK: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)<title>(.*?)</title>").unwrap());
-static RE_BR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)<br\s*/?>").unwrap());
-static RE_BLOCK_END: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)</(?:p|div|h[1-6]|blockquote|tr|li|section|article)>").unwrap());
-static RE_HR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)<hr\s*/?>").unwrap());
-static RE_TAGS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<[^>]+>").unwrap());
+static RE_TAG_PASS: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(<br\s*/?>)|(<hr\s*/?>)|(</(?:p|div|h[1-6]|blockquote|tr|li|section|article)>)|<[^>]+>")
+        .unwrap()
+});
 static RE_SPACES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[ \t\r\f\v]+").unwrap());
 static RE_MULTI_NL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
 
@@ -63,10 +62,17 @@ struct Work {
 }
 
 fn clean_html_to_text(html: &str) -> String {
-    let text = RE_BR.replace_all(html, "\n");
-    let text = RE_BLOCK_END.replace_all(&text, "\n\n");
-    let text = RE_HR.replace_all(&text, "\n\n---\n\n");
-    let text = RE_TAGS.replace_all(&text, "");
+    let text = RE_TAG_PASS.replace_all(html, |c: &regex::Captures| -> &'static str {
+        if c.get(1).is_some() {
+            "\n"
+        } else if c.get(2).is_some() {
+            "\n\n---\n\n"
+        } else if c.get(3).is_some() {
+            "\n\n"
+        } else {
+            ""
+        }
+    });
     let text = html_escape_decode(&text);
     let text = RE_SPACES.replace_all(&text, " ");
     let text = RE_MULTI_NL.replace_all(&text, "\n\n");
@@ -74,13 +80,35 @@ fn clean_html_to_text(html: &str) -> String {
 }
 
 fn html_escape_decode(s: &str) -> String {
-    s.replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&apos;", "'")
-        .replace("&nbsp;", " ")
+    let Some(first) = s.find('&') else { return s.to_string() };
+    let mut out = String::with_capacity(s.len());
+    out.push_str(&s[..first]);
+    let mut rest = &s[first..];
+    while let Some(i) = rest.find('&') {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i..];
+        let (rep, len) = if tail.starts_with("&amp;") {
+            ("&", 5)
+        } else if tail.starts_with("&lt;") {
+            ("<", 4)
+        } else if tail.starts_with("&gt;") {
+            (">", 4)
+        } else if tail.starts_with("&quot;") {
+            ("\"", 6)
+        } else if tail.starts_with("&#39;") {
+            ("'", 5)
+        } else if tail.starts_with("&apos;") {
+            ("'", 6)
+        } else if tail.starts_with("&nbsp;") {
+            (" ", 6)
+        } else {
+            ("&", 1)
+        };
+        out.push_str(rep);
+        rest = &rest[i + len..];
+    }
+    out.push_str(rest);
+    out
 }
 
 fn work_id_from_name(name: &str) -> u64 {
@@ -160,17 +188,33 @@ fn extract_prose(epub: &[u8], work_id: u64) -> Option<Work> {
         if entry.read_to_end(&mut raw).is_err() {
             continue;
         }
-        let html = String::from_utf8_lossy(&raw);
+        let lossy;
+        let html = match std::str::from_utf8(&raw) {
+            Ok(s) => s,
+            Err(_) => {
+                lossy = String::from_utf8_lossy(&raw).into_owned();
+                lossy.as_str()
+            }
+        };
 
         let ch_title = RE_TITLE_TAG
-            .captures(&html)
-            .or_else(|| RE_TITLE_FALLBACK.captures(&html))
+            .captures(html)
+            .or_else(|| RE_TITLE_FALLBACK.captures(html))
             .map(|m| clean_html_to_text(&m[1]))
             .unwrap_or_default();
 
-        let body_html =
-            RE_USERSTUFF.captures(&html).map(|m| m[1].to_string()).unwrap_or_else(|| html.to_string());
-        let body_text = clean_html_to_text(&body_html);
+        let body_html = RE_USERSTUFF_START.find(html).map(|m| {
+            let start = m.end();
+            let tail = &html[start..];
+            let end = match (tail.find("fff_chapter_notes"), tail.find("</body>")) {
+                (Some(a), Some(b)) => a.min(b),
+                (Some(a), None) => a,
+                (None, Some(b)) => b,
+                (None, None) => tail.len(),
+            };
+            &html[start..start + end]
+        }).unwrap_or(html);
+        let body_text = clean_html_to_text(body_html);
 
         if !ch_title.is_empty() && !body_text.starts_with(&ch_title) {
             chapters.push(format!("### {ch_title}\n\n{body_text}"));
@@ -188,7 +232,11 @@ fn extract_prose(epub: &[u8], work_id: u64) -> Option<Work> {
 }
 
 fn compress_frame(data: &[u8]) -> Vec<u8> {
-    zstd::encode_all(data, ZSTD_LEVEL).expect("zstd compression failed")
+    std::thread_local! {
+        static COMPRESSOR: std::cell::RefCell<zstd::bulk::Compressor<'static>> =
+            std::cell::RefCell::new(zstd::bulk::Compressor::new(ZSTD_LEVEL).expect("zstd compressor"));
+    }
+    COMPRESSOR.with(|c| c.borrow_mut().compress(data).expect("zstd compression failed"))
 }
 
 fn write_seek_table<W: Write>(f: &mut W, entries: &[(u32, u32)]) {
