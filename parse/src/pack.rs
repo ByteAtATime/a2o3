@@ -40,12 +40,26 @@ static RE_TITLE_TAG: LazyLock<Regex> = LazyLock::new(|| {
 });
 static RE_TITLE_FALLBACK: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)<title>(.*?)</title>").unwrap());
+static RE_A_TAG: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?is)<a\s[^>]*href="([^"]*)"[^>]*>(.*?)</a>"#).unwrap()
+});
+static RE_EM_TAG: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)</?(?:em|i)>").unwrap());
+static RE_STRONG_TAG: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)</?(?:strong|b)>").unwrap());
+static RE_STRIKE_TAG: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)</?(?:s|strike|del)>").unwrap());
+static RE_CODE_TAG: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)</?code>").unwrap());
+static RE_Q_OPEN_TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)<q>").unwrap());
+static RE_Q_CLOSE_TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)</q>").unwrap());
 static RE_TAG_PASS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)(<br\s*/?>)|(<hr\s*/?>)|(</(?:p|div|h[1-6]|blockquote|tr|li|section|article)>)|<[^>]+>")
+    Regex::new(r"(?i)(<br\s*/?>)|(<hr\s*/?>)|(</(?:p|div|h[1-6]|blockquote|li|ul|ol|section|article|pre|details|summary|figure|figcaption|center)\b[^>]*>)|(<(?:p|div|h[1-6]|blockquote|li|ul|ol|section|article|pre|details|summary|figure|figcaption|center)\b[^>]*>)|(<[^>]+>)")
         .unwrap()
 });
 static RE_SPACES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[ \t\r\f\v]+").unwrap());
 static RE_MULTI_NL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
+static RE_MD_HR_LIKE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^([*_=-]{3,})[ \t]*$").unwrap());
 
 #[derive(Clone)]
 struct SortKey {
@@ -62,19 +76,34 @@ struct Work {
 }
 
 fn clean_html_to_text(html: &str) -> String {
-    let text = html_escape_decode(html);
-    let text = RE_TAG_PASS.replace_all(&text, |c: &regex::Captures| -> &'static str {
+    let text = html.replace("&lt;", "\u{2}").replace("&gt;", "\u{3}");
+    let text = html_escape_decode(&text);
+    let text = RE_A_TAG.replace_all(&text, |c: &regex::Captures| format!("[{}]({})", &c[2], &c[1]));
+    let text = RE_EM_TAG.replace_all(&text, "*");
+    let text = RE_STRONG_TAG.replace_all(&text, "**");
+    let text = RE_STRIKE_TAG.replace_all(&text, "~~");
+    let text = RE_CODE_TAG.replace_all(&text, "`");
+    let text = RE_Q_OPEN_TAG.replace_all(&text, "\"");
+    let text = RE_Q_CLOSE_TAG.replace_all(&text, "\"");
+    let text = RE_TAG_PASS.replace_all(&text, |c: &regex::Captures| -> String {
         if c.get(1).is_some() {
-            "\n"
+            "\n".into()
         } else if c.get(2).is_some() {
-            "\n\n---\n\n"
+            format!("\n\n\u{1}\n\n")
         } else if c.get(3).is_some() {
-            "\n\n"
+            "\n\n".into()
+        } else if c.get(4).is_some() {
+            String::new()
+        } else if let Some(m) = c.get(5) {
+            m.as_str().to_lowercase()
         } else {
-            ""
+            String::new()
         }
     });
     let text = RE_SPACES.replace_all(&text, " ");
+    let text = RE_MD_HR_LIKE.replace_all(&text, |c: &regex::Captures| format!("\\{}", &c[1]));
+    let text = text.replace('\u{1}', "---");
+    let text = text.replace('\u{2}', "&lt;").replace('\u{3}', "&gt;");
     let text = RE_MULTI_NL.replace_all(&text, "\n\n");
     text.trim().to_string()
 }
@@ -561,11 +590,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn escapes_author_literal_tags() {
+        let html = r#"<p>&lt;barghest&gt; Hey Koji, guess what!</p>"#;
+        assert_eq!(clean_html_to_text(html), "&lt;barghest&gt; Hey Koji, guess what!");
+    }
+
+    #[test]
     fn strips_escaped_markup() {
         let html = r#"<div class="userstuff"><p>He typed &lt;div class="chapter"&gt; aloud.</p><p>End &amp; done.</p></div>"#;
         let text = clean_html_to_text(html);
-        assert!(!text.contains('<'), "leftover markup in: {text:?}");
-        assert_eq!(text, "He typed aloud.\n\nEnd & done.");
+        assert_eq!(text, "He typed &lt;div class=\"chapter\"&gt; aloud.\n\nEnd & done.");
     }
 
     #[test]
@@ -576,7 +610,7 @@ mod tests {
 
     #[test]
     fn double_escape_survives() {
-        assert_eq!(clean_html_to_text("<p>&amp;lt;div&amp;gt;</p>"), "<div>");
+        assert_eq!(clean_html_to_text("<p>&amp;lt;div&amp;gt;</p>"), "&lt;div&gt;");
     }
 
     #[test]
@@ -595,5 +629,82 @@ mod tests {
         let tail = "<p>Prose.</p><div>notes";
         let end = tail.find("notes").unwrap();
         assert_eq!(cut_mid_tag(tail, end), end);
+    }
+
+    #[test]
+    fn keeps_inline_formatting() {
+        assert_eq!(
+            clean_html_to_text("<p>He was <em>very</em> <strong>bold</strong> and <i>italic</i>.</p>"),
+            "He was *very* **bold** and *italic*."
+        );
+    }
+
+    #[test]
+    fn keeps_links() {
+        assert_eq!(
+            clean_html_to_text(r#"<p>See <a href="https://archiveofourown.org/works/1">this</a> now.</p>"#),
+            "See [this](https://archiveofourown.org/works/1) now."
+        );
+    }
+
+    #[test]
+    fn keeps_strike_and_code() {
+        assert_eq!(
+            clean_html_to_text("<p><s>old</s> <strike>gone</strike> <code>x = 1</code></p>"),
+            "~~old~~ ~~gone~~ `x = 1`"
+        );
+    }
+
+    #[test]
+    fn keeps_nested_formatting_in_links() {
+        assert_eq!(
+            clean_html_to_text(r#"<p><a href="/works/9"><em>Fic</em> here</a></p>"#),
+            "[*Fic* here](/works/9)"
+        );
+    }
+
+    #[test]
+    fn keeps_sup_sub() {
+        assert_eq!(
+            clean_html_to_text("<p>x<sup>2</sup> and H<sub>2</sub>O</p>"),
+            "x<sup>2</sup> and H<sub>2</sub>O"
+        );
+    }
+
+    #[test]
+    fn keeps_dl() {
+        assert_eq!(
+            clean_html_to_text("<dl><dt>Term</dt><dd>Definition</dd></dl>"),
+            "<dl><dt>Term</dt><dd>Definition</dd></dl>"
+        );
+    }
+
+    #[test]
+    fn keeps_tables() {
+        assert_eq!(
+            clean_html_to_text("<table><tr><td>a</td><td><em>b</em></td></tr></table>"),
+            "<table><tr><td>a</td><td>*b*</td></tr></table>"
+        );
+    }
+
+    #[test]
+    fn passes_through_misc_tags() {
+        assert_eq!(
+            clean_html_to_text("<p>Hi <SPAN Class='x'>there</SPAN>.</p>"),
+            "Hi <span class='x'>there</span>."
+        );
+    }
+
+    #[test]
+    fn escapes_author_hr_like_lines() {
+        assert_eq!(
+            clean_html_to_text("<p>Before</p>\n<p>***</p>\n<p>After</p>"),
+            "Before\n\n\\***\n\nAfter"
+        );
+    }
+
+    #[test]
+    fn real_hr_stays_hr() {
+        assert_eq!(clean_html_to_text("<p>A</p><hr/><p>B</p>"), "A\n\n---\n\nB");
     }
 }
