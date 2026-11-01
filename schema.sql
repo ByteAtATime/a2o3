@@ -43,7 +43,25 @@ CREATE TABLE IF NOT EXISTS works
 
     -- notes
     chapter_notes    Array(String) CODEC(ZSTD(19)),
-    end_notes        Nullable(String) CODEC(ZSTD(19))
+    end_notes        Nullable(String) CODEC(ZSTD(19)),
+
+    -- low cardinality
+    INDEX idx_language     language            TYPE set(100) GRANULARITY 1,
+    INDEX idx_rating       rating              TYPE set(25) GRANULARITY 1,
+    INDEX idx_is_completed is_completed        TYPE set(2) GRANULARITY 1,
+    -- ranges
+    INDEX idx_words          words            TYPE minmax GRANULARITY 1,
+    INDEX idx_kudos          kudos            TYPE minmax GRANULARITY 1,
+    INDEX idx_chapters_count chapters_count   TYPE minmax GRANULARITY 1,
+    INDEX idx_published_date published_date   TYPE minmax GRANULARITY 1,
+    INDEX idx_updated_date   updated_date     TYPE minmax GRANULARITY 1,
+    -- tag membership
+    INDEX idx_fandom_ids       fandom_ids       TYPE bloom_filter(0.01) GRANULARITY 1,
+    INDEX idx_relationship_ids relationship_ids TYPE bloom_filter(0.01) GRANULARITY 1,
+    INDEX idx_character_ids    character_ids    TYPE bloom_filter(0.01) GRANULARITY 1,
+    INDEX idx_freeform_ids     freeform_ids     TYPE bloom_filter(0.01) GRANULARITY 1,
+
+    INDEX idx_title ngrambf_v1(3, 1024, 3, 0) GRANULARITY 1
 )
 ENGINE = ReplacingMergeTree
 PRIMARY KEY work_id
