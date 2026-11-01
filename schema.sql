@@ -43,4 +43,5 @@ CREATE TABLE IF NOT EXISTS works
 )
 ENGINE = MergeTree
 PRIMARY KEY work_id
-ORDER BY (work_id);
+ORDER BY (work_id)
+SETTINGS max_compress_block_size = 10485760;
