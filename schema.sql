@@ -3,7 +3,7 @@ CREATE TABLE IF NOT EXISTS works
     -- metadata
     work_id          UInt32 CODEC(Delta, ZSTD(6)),
     title            String CODEC(ZSTD(19)),
-    author_ids       Array(UInt32) CODEC(ZSTD(6)),
+    authors          Array(LowCardinality(String)) CODEC(ZSTD(19)),
 
     -- categories & stuff
     rating           LowCardinality(String) CODEC(ZSTD(6)),
