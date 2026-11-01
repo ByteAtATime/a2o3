@@ -39,9 +39,13 @@ CREATE TABLE IF NOT EXISTS works
 
     collections      Array(LowCardinality(String)) CODEC(ZSTD(6)),
 
-    summary          Nullable(String) CODEC(ZSTD(19))
+    summary          Nullable(String) CODEC(ZSTD(19)),
+
+    -- notes
+    chapter_notes    Array(String) CODEC(ZSTD(19)),
+    end_notes        Nullable(String) CODEC(ZSTD(19))
 )
-ENGINE = MergeTree
+ENGINE = ReplacingMergeTree
 PRIMARY KEY work_id
 ORDER BY (work_id)
 SETTINGS max_compress_block_size = 10485760;
