@@ -26,6 +26,8 @@ sirocco = "0.3"
 rayon = "1"
 zstd = "0.14"
 zeekstd = "0.6"
+fast_h2m = { version = "0.4.4", default-features = false }
+html-escape = "0.2"
 
 [profile.release]
 opt-level = 3

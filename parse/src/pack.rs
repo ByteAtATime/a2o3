@@ -1,4 +1,3 @@
-use quick_xml::{events::{BytesStart, Event}, Reader};
 use rayon::prelude::*;
 use regex::Regex;
 use std::{
@@ -33,59 +32,77 @@ static RE_FILENAME_ID: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)[-_](\d+)\.epub$").unwrap());
 static RE_CHAPTER_FILE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i).*/(?:file|chapter)\d+(?:_u\d+)?\.x?html$").unwrap());
-static RE_USERSTUFF_START: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)<div[^>]*class="userstuff[^"]*"[^>]*>"#).unwrap()
+static PRESERVED_TAGS: LazyLock<Vec<String>> = LazyLock::new(|| {
+    [
+        "span", "sup", "sub", "u", "small", "sml", "mark", "abbr", "cite", "q", "ruby", "rt",
+        "bdi", "wbr", "ins", "del", "kbd", "samp", "var", "dfn", "time",
+    ]
+    .iter()
+    .map(|tag| tag.to_string())
+    .collect()
 });
-static RE_TITLE_TAG: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)<h[1-6][^>]*class="fff_chapter_title"[^>]*>(.*?)</h[1-6]>"#).unwrap()
-});
-static RE_TITLE_FALLBACK: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)<title>(.*?)</title>").unwrap());
-static RE_MD_HR_LIKE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^([-=]{3,})[ \t]*$").unwrap());
-static RE_SPACES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[ \t\r\f\v]+").unwrap());
-static RE_MULTI_NL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
 
-const BLOCK_TAGS: &[&str] = &[
-    "p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "li", "ul", "ol", "section",
-    "article", "pre", "details", "summary", "figure", "figcaption", "center",
-];
-
-fn escape_md(s: &str) -> String {
-    let decoded = html_escape_decode(s);
-    if !decoded.contains(['\\', '*', '_', '~', '`', '&', '<', '>']) {
-        return decoded;
-    }
-    let mut out = String::with_capacity(decoded.len() + 8);
-    for ch in decoded.chars() {
-        match ch {
-            '\\' | '*' | '_' | '~' | '`' => {
-                out.push('\\');
-                out.push(ch);
-            }
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            _ => out.push(ch),
-        }
-    }
-    out
+fn html_to_markdown(html: &str) -> String {
+    let mut options = fast_h2m::ConversionOptions::default();
+    options.preserve_tags = PRESERVED_TAGS.clone();
+    options.escape_asterisks = true;
+    options.escape_underscores = true;
+    options.escape_misc = true;
+    fast_h2m::convert(html, options)
+        .ok()
+        .and_then(|result| result.content)
+        .map(|text| text.trim().to_string())
+        .unwrap_or_default()
 }
 
-fn tag_name(e: &BytesStart) -> String {
-    String::from_utf8_lossy(e.name().as_ref()).to_lowercase()
+fn html_escape_decode(s: &str) -> String {
+    html_escape::decode_html_entities(s).into_owned()
 }
 
-fn passthrough_tag(e: &BytesStart) -> String {
-    let mut out = format!("<{}", tag_name(e));
-    for a in e.attributes().flatten() {
-        out.push(' ');
-        out.push_str(&String::from_utf8_lossy(a.key.as_ref()).to_lowercase());
-        out.push_str("=\"");
-        out.push_str(&String::from_utf8_lossy(&a.value));
-        out.push('"');
+fn chapter_title(html: &str) -> String {
+    let doc = scraper::Html::parse_document(html);
+    let heading = scraper::Selector::parse("[class~=fff_chapter_title]")
+        .ok()
+        .and_then(|selector| doc.select(&selector).next())
+        .map(|element| element.inner_html());
+    let text = heading.or_else(|| {
+        scraper::Selector::parse("title")
+            .ok()
+            .and_then(|selector| doc.select(&selector).next())
+            .map(|element| element.inner_html())
+    });
+    text.map(|inner| {
+        let mut plain = fast_h2m::ConversionOptions::default();
+        plain.escape_asterisks = false;
+        plain.escape_underscores = false;
+        plain.escape_misc = false;
+        fast_h2m::convert(&inner, plain)
+            .ok()
+            .and_then(|result| result.content)
+            .unwrap_or_default()
+            .replace('\n', " ")
+            .trim()
+            .to_string()
+    })
+    .unwrap_or_default()
+}
+
+fn userstuff_html(html: &str) -> String {
+    let doc = scraper::Html::parse_document(html);
+    let Ok(selector) = scraper::Selector::parse("div.userstuff") else {
+        return html.to_string();
+    };
+    match doc.select(&selector).next() {
+        Some(element) => element.inner_html(),
+        None => html.to_string(),
     }
-    out.push('>');
-    out
+}
+
+fn work_id_from_name(name: &str) -> u64 {
+    RE_FILENAME_ID
+        .captures(name)
+        .and_then(|m| m[1].parse().ok())
+        .unwrap_or(0)
 }
 
 #[derive(Clone)]
@@ -100,123 +117,6 @@ struct SortKey {
 struct Work {
     work_id: u64,
     text: Vec<u8>,
-}
-
-fn clean_html_to_text(html: &str) -> String {
-    let mut reader = Reader::from_reader(html.as_bytes());
-    reader.config_mut().trim_text(false);
-    let mut out = String::with_capacity(html.len());
-    let mut buf = Vec::new();
-    let mut hrefs: Vec<String> = Vec::new();
-    loop {
-        let ev = match reader.read_event_into(&mut buf) {
-            Ok(ev) => ev,
-            Err(_) => {
-                let pos = (reader.buffer_position() as usize).min(html.len());
-                out.push_str(&escape_md(&html[pos..]));
-                break;
-            }
-        };
-        match ev {
-            Event::Start(e) => match tag_name(&e).as_str() {
-                "br" => out.push('\n'),
-                "hr" => out.push_str("\n\n---\n\n"),
-                "a" => {
-                    let href = e
-                        .attributes()
-                        .flatten()
-                        .find(|a| a.key.as_ref() == b"href")
-                        .map(|a| String::from_utf8_lossy(&a.value).into_owned())
-                        .unwrap_or_default();
-                    hrefs.push(href);
-                    out.push('[');
-                }
-                "em" | "i" => out.push('*'),
-                "strong" | "b" => out.push_str("**"),
-                "s" | "strike" | "del" => out.push_str("~~"),
-                "code" => out.push('`'),
-                "q" => out.push('"'),
-                name if BLOCK_TAGS.contains(&name) => {}
-                _ => out.push_str(&passthrough_tag(&e)),
-            },
-            Event::Empty(e) => match tag_name(&e).as_str() {
-                "br" => out.push('\n'),
-                "hr" => out.push_str("\n\n---\n\n"),
-                name if BLOCK_TAGS.contains(&name) => {}
-                _ => out.push_str(&passthrough_tag(&e)),
-            },
-            Event::End(e) => {
-                let name = String::from_utf8_lossy(e.name().as_ref()).to_lowercase();
-                match name.as_str() {
-                "a" => {
-                    let href = hrefs.pop().unwrap_or_default();
-                    out.push_str(&format!("]({href})"));
-                }
-                "em" | "i" => out.push('*'),
-                "strong" | "b" => out.push_str("**"),
-                "s" | "strike" | "del" => out.push_str("~~"),
-                "code" => out.push('`'),
-                "q" => out.push('"'),
-                name if BLOCK_TAGS.contains(&name) => out.push_str("\n\n"),
-                name => out.push_str(&format!("</{name}>")),
-                }
-            }
-            Event::Text(t) => out.push_str(&escape_md(&String::from_utf8_lossy(t.as_ref()))),
-            Event::Eof => break,
-            _ => {}
-        }
-        buf.clear();
-    }
-    let text = RE_SPACES.replace_all(&out, " ");
-    let text = RE_MD_HR_LIKE.replace_all(&text, |c: &regex::Captures| format!("\\{}", &c[1]));
-    let text = RE_MULTI_NL.replace_all(&text, "\n\n");
-    text.trim().to_string()
-}
-
-fn html_escape_decode(s: &str) -> String {
-    let Some(first) = s.find('&') else { return s.to_string() };
-    let mut out = String::with_capacity(s.len());
-    out.push_str(&s[..first]);
-    let mut rest = &s[first..];
-    while let Some(i) = rest.find('&') {
-        out.push_str(&rest[..i]);
-        let tail = &rest[i..];
-        let (rep, len) = if tail.starts_with("&amp;") {
-            ("&", 5)
-        } else if tail.starts_with("&lt;") {
-            ("<", 4)
-        } else if tail.starts_with("&gt;") {
-            (">", 4)
-        } else if tail.starts_with("&quot;") {
-            ("\"", 6)
-        } else if tail.starts_with("&#39;") {
-            ("'", 5)
-        } else if tail.starts_with("&apos;") {
-            ("'", 6)
-        } else if tail.starts_with("&nbsp;") {
-            (" ", 6)
-        } else {
-            ("&", 1)
-        };
-        out.push_str(rep);
-        rest = &rest[i + len..];
-    }
-    out.push_str(rest);
-    out
-}
-
-fn cut_mid_tag(tail: &str, end: usize) -> usize {
-    match tail[..end].rfind('<') {
-        Some(lt) if lt > tail[..end].rfind('>').unwrap_or(0) => lt,
-        _ => end,
-    }
-}
-
-fn work_id_from_name(name: &str) -> u64 {
-    RE_FILENAME_ID
-        .captures(name)
-        .and_then(|m| m[1].parse().ok())
-        .unwrap_or(0)
 }
 
 fn scan_metadata(epub: &[u8], name: &str) -> Option<SortKey> {
@@ -298,24 +198,10 @@ fn extract_prose(epub: &[u8], work_id: u64) -> Option<Work> {
             }
         };
 
-        let ch_title = RE_TITLE_TAG
-            .captures(html)
-            .or_else(|| RE_TITLE_FALLBACK.captures(html))
-            .map(|m| clean_html_to_text(&m[1]))
-            .unwrap_or_default();
+        let ch_title = chapter_title(html);
 
-        let body_html = RE_USERSTUFF_START.find(html).map(|m| {
-            let start = m.end();
-            let tail = &html[start..];
-            let end = match (tail.find("fff_chapter_notes"), tail.find("</body>")) {
-                (Some(a), Some(b)) => a.min(b),
-                (Some(a), None) => a,
-                (None, Some(b)) => b,
-                (None, None) => tail.len(),
-            };
-            &html[start..start + cut_mid_tag(tail, end)]
-        }).unwrap_or(html);
-        let body_text = clean_html_to_text(body_html);
+        let body_html = userstuff_html(html);
+        let body_text = html_to_markdown(&body_html);
 
         if !ch_title.is_empty() && !body_text.starts_with(&ch_title) {
             chapters.push(format!("### {ch_title}\n\n{body_text}"));
@@ -655,138 +541,82 @@ mod tests {
     use super::*;
 
     #[test]
-    fn escapes_author_literal_tags() {
-        let html = r#"<p>&lt;barghest&gt; Hey Koji, guess what!</p>"#;
-        assert_eq!(clean_html_to_text(html), "&lt;barghest&gt; Hey Koji, guess what!");
+    fn nested_emphasis_across_paragraphs_keeps_markers_adjacent() {
+        let html = "<div class=\"userstuff\"><p><em>\n <span>One.</span>\n </em></p><p><em>\n <span>Two.</span>\n </em></p></div>";
+        assert_eq!(html_to_markdown(html), "*<span>One.</span>*\n\n*<span>Two.</span>*");
     }
 
     #[test]
-    fn strips_escaped_markup() {
-        let html = r#"<div class="userstuff"><p>He typed &lt;div class="chapter"&gt; aloud.</p><p>End &amp; done.</p></div>"#;
-        let text = clean_html_to_text(html);
-        assert_eq!(text, "He typed &lt;div class=\"chapter\"&gt; aloud.\n\nEnd & done.");
-    }
-
-    #[test]
-    fn strips_real_markup() {
-        let html = "<h2 class=\"fff_chapter_title\">Ch 1</h2><div class=\"userstuff\"><p>A<br/>B</p></div>";
-        assert_eq!(clean_html_to_text(html), "Ch 1\n\nA\nB");
-    }
-
-    #[test]
-    fn double_escape_survives() {
-        assert_eq!(clean_html_to_text("<p>&amp;lt;div&amp;gt;</p>"), "&amp;lt;div&amp;gt;");
-    }
-
-    #[test]
-    fn cut_backs_up_to_unclosed_tag() {
-        let tail = r#"<p>Prose.</p>
-<div class="fff_chapter_notes">notes</div>"#;
-        let end = tail.find("fff_chapter_notes").unwrap();
-        assert_eq!(cut_mid_tag(tail, end), tail.rfind("<div").unwrap());
-        let text = clean_html_to_text(&tail[..cut_mid_tag(tail, end)]);
-        assert!(!text.contains('<'), "leftover markup in: {text:?}");
-        assert_eq!(text, "Prose.");
-    }
-
-    #[test]
-    fn cut_keeps_clean_boundary() {
-        let tail = "<p>Prose.</p><div>notes";
-        let end = tail.find("notes").unwrap();
-        assert_eq!(cut_mid_tag(tail, end), end);
-    }
-
-    #[test]
-    fn keeps_inline_formatting() {
+    fn inline_emphasis_survives() {
         assert_eq!(
-            clean_html_to_text("<p>He was <em>very</em> <strong>bold</strong> and <i>italic</i>.</p>"),
-            "He was *very* **bold** and *italic*."
+            html_to_markdown("<p>He was <em>very</em> <strong>bold</strong>.</p>"),
+            "He was *very* **bold**."
         );
     }
 
     #[test]
-    fn keeps_links() {
+    fn links_keep_hrefs() {
         assert_eq!(
-            clean_html_to_text(r#"<p>See <a href="https://archiveofourown.org/works/1">this</a> now.</p>"#),
-            "See [this](https://archiveofourown.org/works/1) now."
+            html_to_markdown(r#"<p>See <a href="/works/1">this</a> now.</p>"#),
+            "See [this](/works/1) now."
         );
     }
 
     #[test]
-    fn keeps_strike_and_code() {
+    fn horizontal_rule_is_not_escaped() {
+        assert_eq!(html_to_markdown("<p>A</p><hr/><p>B</p>"), "A\n\n---\n\nB");
+    }
+
+    #[test]
+    fn userstuff_body_is_selected() {
+        let html = "<html><body><blockquote class=\"userstuff\">note</blockquote><div class=\"userstuff module\"><p>Body.</p></div></body></html>";
+        assert_eq!(userstuff_html(html), "<p>Body.</p>");
+    }
+
+    #[test]
+    fn userstuff_selection_is_well_formed_at_the_end() {
+        let html = "<html><body><div class=\"userstuff\"><p>Prose.</p></div></div></body></html>";
+        assert_eq!(html_to_markdown(&userstuff_html(html)), "Prose.");
+    }
+
+    #[test]
+    fn chapter_title_prefers_heading() {
+        let html = "<h3 class=\"fff_chapter_title\">1. Shock</h3><title>Web Title</title>";
+        assert_eq!(chapter_title(html), "1. Shock");
+    }
+
+    #[test]
+    fn chapter_title_falls_back_to_title_tag() {
+        assert_eq!(chapter_title("<title>Fallback</title>"), "Fallback");
+    }
+
+    #[test]
+    fn custom_tags_are_preserved() {
         assert_eq!(
-            clean_html_to_text("<p><s>old</s> <strike>gone</strike> <code>x = 1</code></p>"),
-            "~~old~~ ~~gone~~ `x = 1`"
+            html_to_markdown(r#"<p><span class="s1">Hello.</span></p>"#),
+            "<span class=\"s1\">Hello.</span>"
+        );
+        assert_eq!(html_to_markdown("<p>x<sup>2</sup></p>"), "x<sup>2</sup>");
+    }
+
+    #[test]
+    fn author_markdown_is_escaped() {
+        assert_eq!(
+            html_to_markdown("<p>He *sighs* and _walks_.</p>"),
+            "He \\*sighs\\* and \\_walks\\_."
         );
     }
 
     #[test]
-    fn keeps_nested_formatting_in_links() {
+    fn author_dash_rule_is_not_a_real_rule() {
         assert_eq!(
-            clean_html_to_text(r#"<p><a href="/works/9"><em>Fic</em> here</a></p>"#),
-            "[*Fic* here](/works/9)"
+            html_to_markdown("<p>Before</p><p>---</p><p>After</p>"),
+            "Before\n\n\\-\\-\\-\n\nAfter"
         );
     }
 
     #[test]
-    fn keeps_sup_sub() {
-        assert_eq!(
-            clean_html_to_text("<p>x<sup>2</sup> and H<sub>2</sub>O</p>"),
-            "x<sup>2</sup> and H<sub>2</sub>O"
-        );
-    }
-
-    #[test]
-    fn keeps_dl() {
-        assert_eq!(
-            clean_html_to_text("<dl><dt>Term</dt><dd>Definition</dd></dl>"),
-            "<dl><dt>Term</dt><dd>Definition</dd></dl>"
-        );
-    }
-
-    #[test]
-    fn keeps_tables() {
-        assert_eq!(
-            clean_html_to_text("<table><tr><td>a</td><td><em>b</em></td></tr></table>"),
-            "<table><tr><td>a</td><td>*b*</td></tr></table>"
-        );
-    }
-
-    #[test]
-    fn passes_through_misc_tags() {
-        assert_eq!(
-            clean_html_to_text("<p>Hi <SPAN Class='x'>there</SPAN>.</p>"),
-            "Hi <span class=\"x\">there</span>."
-        );
-    }
-
-    #[test]
-    fn escapes_author_hr_like_lines() {
-        assert_eq!(
-            clean_html_to_text("<p>Before</p>\n<p>***</p>\n<p>After</p>"),
-            "Before\n\n\\*\\*\\*\n\nAfter"
-        );
-        assert_eq!(
-            clean_html_to_text("<p>Before</p>\n<p>---</p>\n<p>After</p>"),
-            "Before\n\n\\---\n\nAfter"
-        );
-    }
-
-    #[test]
-    fn escapes_author_literal_asterisks() {
-        assert_eq!(
-            clean_html_to_text("<p>He *sighs* and _walks_ ~away~ with `code`.</p>"),
-            "He \\*sighs\\* and \\_walks\\_ \\~away\\~ with \\`code\\`."
-        );
-    }
-
-    #[test]
-    fn escapes_author_backslash() {
-        assert_eq!(clean_html_to_text("<p>a\\b</p>"), "a\\\\b");
-    }
-
-    #[test]
-    fn real_hr_stays_hr() {
-        assert_eq!(clean_html_to_text("<p>A</p><hr/><p>B</p>"), "A\n\n---\n\nB");
+    fn entities_decode() {
+        assert_eq!(html_escape_decode("&lt;barghest&gt; &amp; more"), "<barghest> & more");
     }
 }
