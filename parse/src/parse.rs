@@ -2,7 +2,7 @@ use rayon::prelude::*;
 use std::{
     env,
     fs,
-    io::{Cursor, Read, Seek, Write},
+    io::{Cursor, Read, Seek},
     process,
 };
 
@@ -600,21 +600,68 @@ LEFT JOIN (
 ) AS tag_ids ON tag_ids.work_id = s.work_id
 "#;
 
-fn run_sql(sql: &str) -> Result<(), String> {
-    let output = process::Command::new("chctl")
-        .args(["local", "client", "--query", sql])
-        .stdin(process::Stdio::null())
-        .output()
-        .map_err(|e| format!("Failed to spawn chctl: {e}"))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).into_owned())
+
+struct ClickHouse {
+    url: String,
+    user: String,
+    password: String,
+    database: Option<String>,
+}
+
+impl ClickHouse {
+    fn from_env() -> Self {
+        Self {
+            url: env::var("CH_URL").unwrap_or_else(|_| "http://localhost:8123".into()),
+            user: env::var("CH_USER").unwrap_or_else(|_| "default".into()),
+            password: env::var("CH_PASSWORD").unwrap_or_default(),
+            database: env::var("CH_DATABASE").ok(),
+        }
+    }
+
+    fn request(&self, query: &str) -> Result<ureq::RequestBuilder<ureq::typestate::WithBody>, String> {
+        let mut endpoint = url::Url::parse(&self.url)
+            .map_err(|e| format!("Invalid CH_URL {:?}: {e}", self.url))?;
+        endpoint.query_pairs_mut().append_pair("query", query);
+        if let Some(database) = &self.database {
+            endpoint.query_pairs_mut().append_pair("database", database);
+        }
+        let mut request = ureq::post(endpoint.as_str()).config().http_status_as_error(false).build();
+        if !self.user.is_empty() {
+            request = request.header("X-ClickHouse-User", &self.user);
+        }
+        if !self.password.is_empty() {
+            request = request.header("X-ClickHouse-Key", &self.password);
+        }
+        Ok(request)
+    }
+
+    fn check(&self, response: Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> Result<(), String> {
+        let response = response.map_err(|e| format!("Could not reach {}: {e}", self.url))?;
+        if response.status().is_success() {
+            return Ok(());
+        }
+        let status = response.status();
+        let mut response = response;
+        let detail = response.body_mut().read_to_string().unwrap_or_default();
+        let detail = detail.trim();
+        if detail.is_empty() {
+            Err(format!("ClickHouse returned HTTP {status}"))
+        } else {
+            Err(format!("ClickHouse returned HTTP {status}: {detail}"))
+        }
+    }
+
+    fn execute(&self, sql: &str) -> Result<(), String> {
+        self.check(self.request(sql)?.send(&[]))
+    }
+
+    fn insert(&self, sql: &str, body: &[u8]) -> Result<(), String> {
+        self.check(self.request(sql)?.send(body))
     }
 }
 
-fn run_sql_or_exit(sql: &str, what: &str) {
-    if let Err(e) = run_sql(sql) {
+fn run_sql_or_exit(client: &ClickHouse, sql: &str, what: &str) {
+    if let Err(e) = client.execute(sql) {
         eprintln!("{what} failed: {e}");
         process::exit(1);
     }
@@ -644,22 +691,13 @@ fn main() {
     let total = epub_names.len();
     eprintln!("Found {} EPUBs in {}", total, args[1]);
 
-    run_sql_or_exit(CREATE_STAGING_SQL, "Creating the staging table");
-    run_sql_or_exit(TRUNCATE_STAGING_SQL, "Clearing the staging table");
+    let client = ClickHouse::from_env();
+    eprintln!("ClickHouse: {}", client.url);
 
-    let mut child = process::Command::new("chctl")
-        .args(["local", "client", "--query", "INSERT INTO works_staging FORMAT JSONEachRow"])
-        .stdin(process::Stdio::piped())
-        .stdout(process::Stdio::null())
-        .stderr(process::Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|e| {
-            eprintln!("Failed to spawn chctl: {e}");
-            process::exit(1);
-        });
+    run_sql_or_exit(&client, CREATE_STAGING_SQL, "Creating the staging table");
+    run_sql_or_exit(&client, TRUNCATE_STAGING_SQL, "Clearing the staging table");
 
     let start = std::time::Instant::now();
-    let mut stdin = child.stdin.take().unwrap();
     let mut inserted = 0usize;
     let mut last_report = 0usize;
 
@@ -685,22 +723,18 @@ fn main() {
             })
             .collect();
 
+        let mut body = Vec::new();
         for meta in &metas {
-            let row = meta_to_row(meta).to_string();
-            if let Err(e) = stdin
-                .write_all(row.as_bytes())
-                .and_then(|()| stdin.write_all(b"\n"))
-                .and_then(|()| stdin.flush())
-            {
-                drop(stdin);
-                let stderr = child
-                    .wait_with_output()
-                    .map(|o| String::from_utf8_lossy(&o.stderr).into_owned())
-                    .unwrap_or_default();
-                eprintln!("ClickHouse closed the pipe ({e}). Its error output:\n{stderr}");
-                eprintln!("Last row attempted:\n{row}");
-                process::exit(1);
-            }
+            body.extend_from_slice(meta_to_row(meta).to_string().as_bytes());
+            body.push(b'\n');
+        }
+
+        if let Err(e) = client.insert(
+            "INSERT INTO works_staging FORMAT JSONEachRow",
+            &body,
+        ) {
+            eprintln!("ClickHouse insert failed: {e}");
+            process::exit(1);
         }
 
         inserted += metas.len();
@@ -717,15 +751,8 @@ fn main() {
             );
         }
     }
-    drop(stdin);
-
-    let output = child.wait_with_output().unwrap();
-    if !output.status.success() {
-        eprintln!("ClickHouse insert failed: {}", String::from_utf8_lossy(&output.stderr));
-        process::exit(1);
-    }
 
     eprintln!("Staged {} rows in {:.1}m, promoting...", inserted, start.elapsed().as_secs_f64() / 60.0);
-    run_sql_or_exit(PROMOTE_SQL, "Promoting staged rows");
+    run_sql_or_exit(&client, PROMOTE_SQL, "Promoting staged rows");
     eprintln!("Inserted {} rows in {:.1}m", inserted, start.elapsed().as_secs_f64() / 60.0);
 }

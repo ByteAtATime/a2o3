@@ -28,6 +28,8 @@ zstd = "0.14"
 zeekstd = "0.6"
 fast_h2m = { version = "0.4.4", default-features = false }
 html-escape = "0.2"
+ureq = "3.5.0"
+url = "2.5.8"
 
 [profile.release]
 opt-level = 3

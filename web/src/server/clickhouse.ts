@@ -103,6 +103,17 @@ const listLimit = 200;
 const clickHouseUrl = (): string =>
   process.env.CH_URL ?? "http://localhost:8123";
 
+const clickHouseHeaders = (): Record<string, string> => {
+  const headers: Record<string, string> = {};
+  const user = process.env.CH_USER;
+  const password = process.env.CH_PASSWORD;
+  const database = process.env.CH_DATABASE;
+  if (user) headers["X-ClickHouse-User"] = user;
+  if (password) headers["X-ClickHouse-Key"] = password;
+  if (database) headers["X-ClickHouse-Database"] = database;
+  return headers;
+};
+
 const runQuery = async (
   sql: string,
   params: Record<string, string> = {},
@@ -111,7 +122,7 @@ const runQuery = async (
   url.searchParams.set("query", `${sql} FORMAT JSON`);
   for (const [name, value] of Object.entries(params))
     url.searchParams.set(`param_${name}`, value);
-  const response = await fetch(url);
+  const response = await fetch(url, { headers: clickHouseHeaders() });
   if (!response.ok)
     throw new Error(`ClickHouse ${response.status}: ${await response.text()}`);
   const body = z
