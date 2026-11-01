@@ -459,25 +459,6 @@ fn parse_date(val: &Option<String>) -> String {
     }
 }
 
-fn sql_string(value: &str) -> String {
-    format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
-}
-
-// Resolve tag names to ao3_tags ids the same way the search tags do:
-// canonical, unmerged tags of the right type, matched case-insensitively.
-// Only canonical tags are in ao3_tags' primary-key set, so this stays cheap.
-fn tag_ids_sql(names: &[String], tag_type: &str) -> String {
-    if names.is_empty() {
-        return "[]".to_string();
-    }
-    let lowered: Vec<String> = names.iter().map(|n| sql_string(&n.to_lowercase())).collect();
-    format!(
-        "(SELECT groupUniqArray(id) FROM ao3_tags WHERE type = {} AND canonical AND merger_id = 0 AND lower(name) IN ({}))",
-        sql_string(tag_type),
-        lowered.join(", ")
-    )
-}
-
 fn meta_to_row(meta: &Metadata) -> serde_json::Value {
     let work_id: u64 = meta.story_id.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0);
     let authors: Vec<&str> = meta.authors.iter().map(|a| a.name.as_str()).collect();
@@ -499,10 +480,10 @@ fn meta_to_row(meta: &Metadata) -> serde_json::Value {
         "category": meta.category,
         "language": meta.language.as_deref().unwrap_or("English"),
         "is_completed": is_completed,
-        "fandom_ids": tag_ids_sql(&meta.fandoms, "Fandom"),
-        "relationship_ids": tag_ids_sql(&meta.relationships, "Relationship"),
-        "character_ids": tag_ids_sql(&meta.characters, "Character"),
-        "freeform_ids": tag_ids_sql(&meta.freeform_tags, "Freeform"),
+        "fandoms": meta.fandoms,
+        "relationships": meta.relationships,
+        "characters": meta.characters,
+        "freeform_tags": meta.freeform_tags,
         "words": meta.words,
         "chapters_count": chapters_count,
         "chapters_total": meta.chapters_total,
@@ -523,6 +504,121 @@ fn meta_to_row(meta: &Metadata) -> serde_json::Value {
 
 const WORKS_PER_CHUNK: usize = 2048;
 const REPORT_EVERY: usize = 10_000;
+
+const CREATE_STAGING_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS works_staging
+(
+    work_id          UInt32,
+    title            String,
+    authors          Array(String),
+    rating           String,
+    warnings         Array(String),
+    category         Array(String),
+    language         String,
+    is_completed     Bool,
+    fandoms          Array(String),
+    relationships    Array(String),
+    characters       Array(String),
+    freeform_tags    Array(String),
+    words            Nullable(UInt32),
+    chapters_count   UInt16,
+    chapters_total   Nullable(UInt16),
+    published_date   Date,
+    updated_date     Nullable(Date),
+    kudos            Nullable(UInt32),
+    comments         Nullable(UInt32),
+    bookmarks        Nullable(UInt32),
+    hits             Nullable(UInt32),
+    series_names     Array(String),
+    series_indexes   Array(UInt16),
+    collections      Array(String),
+    summary          Nullable(String)
+)
+ENGINE = MergeTree
+ORDER BY work_id
+"#;
+
+const TRUNCATE_STAGING_SQL: &str = "TRUNCATE TABLE works_staging";
+
+const PROMOTE_SQL: &str = r#"
+INSERT INTO works
+SELECT
+    s.work_id,
+    s.title,
+    s.authors,
+    s.rating,
+    s.warnings,
+    s.category,
+    s.language,
+    s.is_completed,
+    tag_ids.fandom_ids,
+    tag_ids.relationship_ids,
+    tag_ids.character_ids,
+    tag_ids.freeform_ids,
+    s.words,
+    s.chapters_count,
+    s.chapters_total,
+    s.published_date,
+    s.updated_date,
+    s.kudos,
+    s.comments,
+    s.bookmarks,
+    s.hits,
+    s.series_names,
+    s.series_indexes,
+    s.collections,
+    s.summary,
+    CAST([] AS Array(String)) AS chapter_notes,
+    CAST(NULL AS Nullable(String)) AS end_notes
+FROM works_staging AS s
+LEFT JOIN (
+    SELECT
+        work_id,
+        groupUniqArrayIf(t.id, t.type = 'Fandom' AND t.id != 0) AS fandom_ids,
+        groupUniqArrayIf(t.id, t.type = 'Relationship' AND t.id != 0) AS relationship_ids,
+        groupUniqArrayIf(t.id, t.type = 'Character' AND t.id != 0) AS character_ids,
+        groupUniqArrayIf(t.id, t.type = 'Freeform' AND t.id != 0) AS freeform_ids
+    FROM (
+        SELECT
+            st.work_id AS work_id,
+            tag_pair.1 AS name,
+            tag_pair.2 AS type
+        FROM works_staging AS st
+        ARRAY JOIN arrayConcat(
+            arrayMap(x -> (x, 'Fandom'), st.fandoms),
+            arrayMap(x -> (x, 'Relationship'), st.relationships),
+            arrayMap(x -> (x, 'Character'), st.characters),
+            arrayMap(x -> (x, 'Freeform'), st.freeform_tags)
+        ) AS tag_pair
+    ) AS names
+    LEFT JOIN (
+        SELECT lower(name) AS name, type, id
+        FROM ao3_tags
+        WHERE canonical AND merger_id = 0
+    ) AS t ON t.name = lower(names.name) AND t.type = names.type
+    GROUP BY work_id
+) AS tag_ids ON tag_ids.work_id = s.work_id
+"#;
+
+fn run_sql(sql: &str) -> Result<(), String> {
+    let output = process::Command::new("chctl")
+        .args(["local", "client", "--query", sql])
+        .stdin(process::Stdio::null())
+        .output()
+        .map_err(|e| format!("Failed to spawn chctl: {e}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).into_owned())
+    }
+}
+
+fn run_sql_or_exit(sql: &str, what: &str) {
+    if let Err(e) = run_sql(sql) {
+        eprintln!("{what} failed: {e}");
+        process::exit(1);
+    }
+}
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -548,8 +644,11 @@ fn main() {
     let total = epub_names.len();
     eprintln!("Found {} EPUBs in {}", total, args[1]);
 
+    run_sql_or_exit(CREATE_STAGING_SQL, "Creating the staging table");
+    run_sql_or_exit(TRUNCATE_STAGING_SQL, "Clearing the staging table");
+
     let mut child = process::Command::new("chctl")
-        .args(["local", "client", "--query", "INSERT INTO works FORMAT JSONEachRow"])
+        .args(["local", "client", "--query", "INSERT INTO works_staging FORMAT JSONEachRow"])
         .stdin(process::Stdio::piped())
         .stdout(process::Stdio::null())
         .stderr(process::Stdio::piped())
@@ -588,10 +687,21 @@ fn main() {
 
         for meta in &metas {
             let row = meta_to_row(meta).to_string();
-            stdin.write_all(row.as_bytes()).unwrap();
-            stdin.write_all(b"\n").unwrap();
+            if let Err(e) = stdin
+                .write_all(row.as_bytes())
+                .and_then(|()| stdin.write_all(b"\n"))
+                .and_then(|()| stdin.flush())
+            {
+                drop(stdin);
+                let stderr = child
+                    .wait_with_output()
+                    .map(|o| String::from_utf8_lossy(&o.stderr).into_owned())
+                    .unwrap_or_default();
+                eprintln!("ClickHouse closed the pipe ({e}). Its error output:\n{stderr}");
+                eprintln!("Last row attempted:\n{row}");
+                process::exit(1);
+            }
         }
-        stdin.flush().unwrap();
 
         inserted += metas.len();
         if inserted / REPORT_EVERY > last_report / REPORT_EVERY {
@@ -615,5 +725,7 @@ fn main() {
         process::exit(1);
     }
 
+    eprintln!("Staged {} rows in {:.1}m, promoting...", inserted, start.elapsed().as_secs_f64() / 60.0);
+    run_sql_or_exit(PROMOTE_SQL, "Promoting staged rows");
     eprintln!("Inserted {} rows in {:.1}m", inserted, start.elapsed().as_secs_f64() / 60.0);
 }
