@@ -1,16 +1,45 @@
 ---
+import '../styles/global.css';
+import { listWorks } from '../server/clickhouse';
+
+const works = await listWorks();
+
+const number = new Intl.NumberFormat('en-US');
 ---
 
+<!doctype html>
 <html lang="en">
 	<head>
 		<meta charset="utf-8" />
-		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-		<link rel="icon" href="/favicon.ico" />
 		<meta name="viewport" content="width=device-width" />
-		<meta name="generator" content={Astro.generator} />
-		<title>Astro</title>
+		<title>Works</title>
 	</head>
 	<body>
-		<h1>Astro</h1>
+		<table>
+			<thead>
+				<tr>
+					<th>Title</th>
+					<th>Authors</th>
+					<th>Fandoms</th>
+					<th>Words</th>
+					<th>Kudos</th>
+				</tr>
+			</thead>
+			<tbody>
+				{
+					works.map((work) => (
+						<tr>
+							<td>
+								<a href={`/works/${work.work_id}`}>{work.title}</a>
+							</td>
+							<td>{work.authors.join(', ')}</td>
+							<td>{work.fandoms.join(', ')}</td>
+							<td>{work.words === null ? '' : number.format(work.words)}</td>
+							<td>{work.kudos === null ? '' : number.format(work.kudos)}</td>
+						</tr>
+					))
+				}
+			</tbody>
+		</table>
 	</body>
 </html>

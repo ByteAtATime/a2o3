@@ -12,6 +12,16 @@
     "astro": "astro"
   },
   "dependencies": {
-    "astro": "^7.4.4"
+    "@astrojs/node": "^11.1.9",
+    "@tailwindcss/vite": "^4.3.3",
+    "astro": "^7.4.4",
+    "fzstd": "^0.1.1",
+    "isomorphic-dompurify": "^4.6.0",
+    "marked": "^18.1.2",
+    "tailwindcss": "^4.3.3",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5"
   }
 }
