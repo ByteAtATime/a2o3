@@ -22,3 +22,11 @@ sirocco = "0.3"
 rayon = "1"
 zstd = "0.14"
 zeekstd = "0.6"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
