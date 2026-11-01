@@ -1,9 +1,9 @@
 ---
-import '../../styles/global.css';
-import DOMPurify from 'isomorphic-dompurify';
-import { marked } from 'marked';
-import { findWork } from '../../server/clickhouse';
-import { readWorkText } from '../../server/shardReader';
+import "../../styles/global.css";
+import DOMPurify from "isomorphic-dompurify";
+import { marked } from "marked";
+import { findWork } from "../../server/clickhouse";
+import { readWorkText } from "../../server/shardReader";
 
 const workId = Number(Astro.params.id);
 const work = Number.isInteger(workId) && workId > 0 ? await findWork(workId) : undefined;
@@ -13,70 +13,66 @@ if (!work) return new Response(null, { status: 404 });
 const text = await readWorkText(workId);
 const proseHtml = text === undefined ? undefined : DOMPurify.sanitize(await marked.parse(text));
 
-const number = new Intl.NumberFormat('en-US');
+const number = new Intl.NumberFormat("en-US");
 
 const tagSections = [
-	{ label: 'Fandoms', values: work.fandoms },
-	{ label: 'Relationships', values: work.relationships },
-	{ label: 'Characters', values: work.characters },
-	{ label: 'Additional Tags', values: work.freeform_tags },
-	{ label: 'Collections', values: work.collections },
+    { label: "Fandoms", values: work.fandoms },
+    { label: "Relationships", values: work.relationships },
+    { label: "Characters", values: work.characters },
+    { label: "Additional Tags", values: work.freeform_tags },
+    { label: "Collections", values: work.collections },
 ].filter((section) => section.values.length > 0);
 
 const stats = [
-	{ label: 'Words', value: work.words },
-	{ label: 'Chapters', value: work.chapters_count },
-	{ label: 'Kudos', value: work.kudos },
-	{ label: 'Comments', value: work.comments },
-	{ label: 'Bookmarks', value: work.bookmarks },
-	{ label: 'Hits', value: work.hits },
+    { label: "Words", value: work.words },
+    { label: "Chapters", value: work.chapters_count },
+    { label: "Kudos", value: work.kudos },
+    { label: "Comments", value: work.comments },
+    { label: "Bookmarks", value: work.bookmarks },
+    { label: "Hits", value: work.hits },
 ].filter((stat) => stat.value !== null);
 ---
 
 <!doctype html>
 <html lang="en">
-	<head>
-		<meta charset="utf-8" />
-		<meta name="viewport" content="width=device-width" />
-		<title>{work.title}</title>
-	</head>
-	<body>
-		<article>
-			<h1>{work.title}</h1>
-			<p>{work.authors.join(', ')}</p>
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width" />
+        <title>{work.title}</title>
+    </head>
+    <body>
+        <article>
+            <h1>{work.title}</h1>
+            <p>{work.authors.join(", ")}</p>
 
-			<dl>
-				<dt>Language</dt>
-				<dd>{work.language}</dd>
-				<dt>Published</dt>
-				<dd>{work.published_date}</dd>
-				<dt>Updated</dt>
-				<dd>{work.updated_date ?? work.published_date}</dd>
-				{
-					stats.map((stat) => (
-						<>
-							<dt>{stat.label}</dt>
-							<dd>{number.format(stat.value)}</dd>
-						</>
-					))
-				}
-			</dl>
+            <dl>
+                <dt>Language</dt>
+                <dd>{work.language}</dd>
+                <dt>Published</dt>
+                <dd>{work.published_date}</dd>
+                <dt>Updated</dt>
+                <dd>{work.updated_date ?? work.published_date}</dd>
+                {stats.map((stat) => (
+                    <>
+                        <dt>{stat.label}</dt>
+                        <dd>{stat.value === null ? "0" : number.format(stat.value)}</dd>
+                    </>
+                ))}
+            </dl>
 
-			{
-				tagSections.map((section) => (
-					<section>
-						<h2>{section.label}</h2>
-						<ul>
-							{section.values.map((value) => (
-								<li>{value}</li>
-							))}
-						</ul>
-					</section>
-				))
-			}
+            {tagSections.map((section) => (
+                <section>
+                    <h2>{section.label}</h2>
+                    <ul>
+                        {section.values.map((value) => (
+                            <li>{value}</li>
+                        ))}
+                    </ul>
+                </section>
+            ))}
 
-			{work.summary && <p>{work.summary}</p>}
-			{proseHtml && <div set:html={proseHtml} />}
-		</article>
-	</body>
+            {work.summary && <p>{work.summary}</p>}
+            {proseHtml && <div set:html={proseHtml} />}
+        </article>
+    </body>
 </html>

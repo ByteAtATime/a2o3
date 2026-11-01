@@ -1,0 +1,34 @@
+---
+type Props = {
+    rows: readonly string[];
+    includeName: string;
+    excludeName: string;
+    includeList: string[];
+    excludeList: string[];
+};
+
+const { rows, includeName, excludeName, includeList, excludeList } = Astro.props;
+---
+
+<table class="w-full text-left text-sm">
+    <thead>
+        <tr class="text-slate-600">
+            <th class="font-normal"></th>
+            <th class="w-20 font-normal">Require</th>
+            <th class="w-20 font-normal">Exclude</th>
+        </tr>
+    </thead>
+    <tbody>
+        {rows.map((row) => {
+            const inInclude = includeList.includes(row);
+            const inExclude = excludeList.includes(row);
+            return (
+                <tr>
+                    <td>{row}</td>
+                    <td><input type="checkbox" name={includeName} value={row} checked={inInclude} /></td>
+                    <td><input type="checkbox" name={excludeName} value={row} checked={inExclude} disabled={inInclude} /></td>
+                </tr>
+            );
+        })}
+    </tbody>
+</table>
