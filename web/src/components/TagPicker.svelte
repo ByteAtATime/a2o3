@@ -17,6 +17,8 @@
         id?: string;
     } = $props();
 
+    type TagSuggestion = { name: string; count: number };
+
     const split = (value: string): string[] =>
         value
             .split(",")
@@ -27,7 +29,7 @@
     let chips = $state(split(initial));
     let value = $state("");
     let open = $state(false);
-    let suggestions = $state<string[]>([]);
+    let suggestions = $state<TagSuggestion[]>([]);
     let activeIndex = $state(0);
     let searching = $state(false);
     let inputEl = $state<HTMLInputElement>(null!);
@@ -52,10 +54,10 @@
             open = true; // popup opens immediately with the spinner, then fills in
             try {
                 const response = await fetch(`/api/autocomplete?type=${type}&term=${encodeURIComponent(t)}`);
-                const names: string[] = await response.json();
-                suggestions = names;
+                const found: TagSuggestion[] = await response.json();
+                suggestions = found;
                 activeIndex = 0;
-                open = names.length > 0 && term() === t;
+                open = found.length > 0 && term() === t;
             } catch {
                 suggestions = [];
                 open = false;
@@ -86,7 +88,7 @@
                 (activeIndex + (event.key === "ArrowDown" ? 1 : -1) + suggestions.length) % suggestions.length;
         } else if (event.key === "Enter") {
             event.preventDefault();
-            select(suggestions[activeIndex]);
+            select(suggestions[activeIndex].name);
         } else if (event.key === "Escape") {
             open = false;
         }
@@ -143,7 +145,7 @@
             {#if suggestions.length === 0 && !searching}
                 <div class="text-muted-foreground px-2 py-1.5">No tags found.</div>
             {:else}
-                {#each suggestions as suggestion, index (suggestion)}
+                {#each suggestions as suggestion, index (suggestion.name)}
                     <div role="option" aria-selected={index === activeIndex}>
                         <button
                             type="button"
@@ -152,9 +154,12 @@
                                 index === activeIndex && "bg-accent text-accent-foreground",
                             )}
                             onmousedown={(event) => event.preventDefault()}
-                            onclick={() => select(suggestion)}
+                            onclick={() => select(suggestion.name)}
                         >
-                            {suggestion}
+                            <span class="flex-1">{suggestion.name}</span>
+                            <span class="text-muted-foreground pl-2 text-xs">
+                                {suggestion.count.toLocaleString()}
+                            </span>
                         </button>
                     </div>
                 {/each}

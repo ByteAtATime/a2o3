@@ -459,6 +459,25 @@ fn parse_date(val: &Option<String>) -> String {
     }
 }
 
+fn sql_string(value: &str) -> String {
+    format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
+}
+
+// Resolve tag names to ao3_tags ids the same way the search tags do:
+// canonical, unmerged tags of the right type, matched case-insensitively.
+// Only canonical tags are in ao3_tags' primary-key set, so this stays cheap.
+fn tag_ids_sql(names: &[String], tag_type: &str) -> String {
+    if names.is_empty() {
+        return "[]".to_string();
+    }
+    let lowered: Vec<String> = names.iter().map(|n| sql_string(&n.to_lowercase())).collect();
+    format!(
+        "(SELECT groupUniqArray(id) FROM ao3_tags WHERE type = {} AND canonical AND merger_id = 0 AND lower(name) IN ({}))",
+        sql_string(tag_type),
+        lowered.join(", ")
+    )
+}
+
 fn meta_to_row(meta: &Metadata) -> serde_json::Value {
     let work_id: u64 = meta.story_id.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0);
     let authors: Vec<&str> = meta.authors.iter().map(|a| a.name.as_str()).collect();
@@ -480,10 +499,10 @@ fn meta_to_row(meta: &Metadata) -> serde_json::Value {
         "category": meta.category,
         "language": meta.language.as_deref().unwrap_or("English"),
         "is_completed": is_completed,
-        "fandoms": meta.fandoms,
-        "relationships": meta.relationships,
-        "characters": meta.characters,
-        "freeform_tags": meta.freeform_tags,
+        "fandom_ids": tag_ids_sql(&meta.fandoms, "Fandom"),
+        "relationship_ids": tag_ids_sql(&meta.relationships, "Relationship"),
+        "character_ids": tag_ids_sql(&meta.characters, "Character"),
+        "freeform_ids": tag_ids_sql(&meta.freeform_tags, "Freeform"),
         "words": meta.words,
         "chapters_count": chapters_count,
         "chapters_total": meta.chapters_total,

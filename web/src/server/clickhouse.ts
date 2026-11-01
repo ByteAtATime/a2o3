@@ -487,26 +487,35 @@ export const AUTOCOMPLETE_TYPES = [
 ] as const;
 export type AutocompleteType = (typeof AUTOCOMPLETE_TYPES)[number];
 
-const autocompleteCache = new Map<string, Promise<string[]>>();
-const autocompleteCacheMax = 200;
+const suggestionCache = new Map<string, Promise<TagSuggestion[]>>();
+const suggestionCacheMax = 200;
+
+export type TagSuggestion = { name: string; count: number };
 
 export const autocompleteTags = async (
   type: AutocompleteType,
   term: string,
-): Promise<string[]> => {
+): Promise<TagSuggestion[]> => {
   const key = `${type}\u0000${term.toLowerCase()}`;
-  let entry = autocompleteCache.get(key);
+  let entry = suggestionCache.get(key);
   if (entry === undefined) {
-    if (autocompleteCache.size >= autocompleteCacheMax) {
-      autocompleteCache.delete(autocompleteCache.keys().next().value as string);
+    if (suggestionCache.size >= suggestionCacheMax) {
+      suggestionCache.delete(suggestionCache.keys().next().value as string);
     }
     entry = runQuery(
-      "SELECT name FROM ao3_tags WHERE type = {t:String} AND name ILIKE {q:String} ORDER BY canonical DESC, name LIMIT 15",
+      `SELECT name, work_count AS count FROM ao3_tag_counts
+       WHERE type = {t:String} AND name ILIKE {q:String}
+       ORDER BY work_count DESC, name LIMIT 15`,
       { t: type[0].toUpperCase() + type.slice(1), q: `%${term}%` },
     ).then((rows) =>
-      rows.map((row) => z.object({ name: z.string() }).parse(row).name),
+      rows.map((row) => {
+        const { name, count } = z
+          .object({ name: z.string(), count: z.number().int() })
+          .parse(row);
+        return { name, count };
+      }),
     );
-    autocompleteCache.set(key, entry);
+    suggestionCache.set(key, entry);
   }
   return entry;
 };
