@@ -502,6 +502,9 @@ fn meta_to_row(meta: &Metadata) -> serde_json::Value {
     })
 }
 
+const WORKS_PER_CHUNK: usize = 2048;
+const REPORT_EVERY: usize = 10_000;
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
@@ -513,7 +516,7 @@ fn main() {
         eprintln!("Failed to open {}: {e}", args[1]);
         process::exit(1);
     });
-    let bundle = ZipArchive::new(file).unwrap_or_else(|e| {
+    let mut bundle = ZipArchive::new(file).unwrap_or_else(|e| {
         eprintln!("Failed to read zip {}: {e}", args[1]);
         process::exit(1);
     });
@@ -523,24 +526,8 @@ fn main() {
         .filter(|n| n.to_lowercase().ends_with(".epub"))
         .map(String::from)
         .collect();
-    eprintln!("Found {} EPUBs in {}", epub_names.len(), args[1]);
-
-    let bundle = std::sync::Arc::new(std::sync::Mutex::new(bundle));
-    let results: Vec<Metadata> = epub_names
-        .par_iter()
-        .filter_map(|name| {
-            let epub = {
-                let mut archive = bundle.lock().unwrap();
-                archive.by_name(name).ok().and_then(|mut f| {
-                    let mut buf = Vec::new();
-                    f.read_to_end(&mut buf).ok().map(|_| buf)
-                })
-            }?;
-            parse_fff_ao3_epub(&epub)
-                .map_err(|e| eprintln!("Error processing {name}: {e}"))
-                .ok()
-        })
-        .collect();
+    let total = epub_names.len();
+    eprintln!("Found {} EPUBs in {}", total, args[1]);
 
     let mut child = process::Command::new("chctl")
         .args(["local", "client", "--query", "INSERT INTO works FORMAT JSONEachRow"])
@@ -553,12 +540,55 @@ fn main() {
             process::exit(1);
         });
 
-    let stdin = child.stdin.as_mut().unwrap();
-    for meta in &results {
-        let row = meta_to_row(meta).to_string();
-        stdin.write_all(row.as_bytes()).unwrap();
-        stdin.write_all(b"\n").unwrap();
+    let start = std::time::Instant::now();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut inserted = 0usize;
+    let mut last_report = 0usize;
+
+    for chunk in epub_names.chunks(WORKS_PER_CHUNK) {
+        let epubs: Vec<Option<Vec<u8>>> = chunk
+            .iter()
+            .map(|name| {
+                bundle.by_name(name).ok().and_then(|mut f| {
+                    let mut buf = Vec::new();
+                    f.read_to_end(&mut buf).ok().map(|_| buf)
+                })
+            })
+            .collect();
+
+        let metas: Vec<Metadata> = epubs
+            .par_iter()
+            .zip(chunk)
+            .filter_map(|(epub, name)| {
+                let epub = epub.as_ref()?;
+                parse_fff_ao3_epub(epub)
+                    .map_err(|e| eprintln!("Error processing {name}: {e}"))
+                    .ok()
+            })
+            .collect();
+
+        for meta in &metas {
+            let row = meta_to_row(meta).to_string();
+            stdin.write_all(row.as_bytes()).unwrap();
+            stdin.write_all(b"\n").unwrap();
+        }
+        stdin.flush().unwrap();
+
+        inserted += metas.len();
+        if inserted / REPORT_EVERY > last_report / REPORT_EVERY {
+            last_report = inserted;
+            let elapsed = start.elapsed().as_secs_f64().max(1e-9);
+            eprintln!(
+                "[insert {}/{}] {:.0} works/sec | elapsed {:.1}m | ETA {:.1}m",
+                inserted,
+                total,
+                inserted as f64 / elapsed,
+                elapsed / 60.0,
+                (total - inserted) as f64 / (inserted as f64 / elapsed) / 60.0,
+            );
+        }
     }
+    drop(stdin);
 
     let output = child.wait_with_output().unwrap();
     if !output.status.success() {
@@ -566,5 +596,5 @@ fn main() {
         process::exit(1);
     }
 
-    eprintln!("Inserted {} rows", results.len());
+    eprintln!("Inserted {} rows in {:.1}m", inserted, start.elapsed().as_secs_f64() / 60.0);
 }
