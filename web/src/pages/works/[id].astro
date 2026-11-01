@@ -20,8 +20,6 @@ const tagSections = [
 	{ label: 'Relationships', values: work.relationships },
 	{ label: 'Characters', values: work.characters },
 	{ label: 'Additional Tags', values: work.freeform_tags },
-	{ label: 'Warnings', values: work.warnings },
-	{ label: 'Category', values: work.category },
 	{ label: 'Collections', values: work.collections },
 ].filter((section) => section.values.length > 0);
 
@@ -48,12 +46,8 @@ const stats = [
 			<p>{work.authors.join(', ')}</p>
 
 			<dl>
-				<dt>Rating</dt>
-				<dd>{work.rating}</dd>
 				<dt>Language</dt>
 				<dd>{work.language}</dd>
-				<dt>Status</dt>
-				<dd>{work.is_completed ? 'Complete' : 'In Progress'}</dd>
 				<dt>Published</dt>
 				<dd>{work.published_date}</dd>
 				<dt>Updated</dt>

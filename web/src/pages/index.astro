@@ -1,6 +1,7 @@
 ---
 import '../styles/global.css';
 import { listWorks } from '../server/clickhouse';
+import RequiredTags from '../components/RequiredTags.astro';
 
 const works = await listWorks();
 
@@ -18,6 +19,7 @@ const number = new Intl.NumberFormat('en-US');
 		<table>
 			<thead>
 				<tr>
+					<th>Symbols</th>
 					<th>Title</th>
 					<th>Authors</th>
 					<th>Fandoms</th>
@@ -29,6 +31,14 @@ const number = new Intl.NumberFormat('en-US');
 				{
 					works.map((work) => (
 						<tr>
+							<td>
+								<RequiredTags
+									rating={work.rating}
+									warnings={work.warnings}
+									category={work.category}
+									isCompleted={work.is_completed}
+								/>
+							</td>
 							<td>
 								<a href={`/works/${work.work_id}`}>{work.title}</a>
 							</td>

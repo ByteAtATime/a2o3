@@ -1,0 +1,65 @@
+---
+type Props = {
+    rating: string;
+    warnings: string[];
+    category: string[];
+    isCompleted: boolean;
+};
+
+type Icon = { icon: string; label: string };
+
+const { rating, warnings, category, isCompleted } = Astro.props;
+
+const ratingIcons: Record<string, string> = {
+    "General Audiences": "rating-general-audience",
+    "Teen And Up Audiences": "rating-teen",
+    Mature: "rating-mature",
+    Explicit: "rating-explicit",
+    "Not Rated": "rating-notrated",
+};
+
+const warningIcons: Record<string, string> = {
+    "Creator Chose Not To Use Archive Warnings": "warning-choosenotto",
+    "Graphic Depictions Of Violence": "warning-yes",
+    "Major Character Death": "warning-yes",
+    "Rape/Non-Con": "warning-yes",
+    "Underage Sex": "warning-yes",
+    "No Archive Warnings Apply": "warning-no",
+};
+
+const categoryIcons: Record<string, string> = {
+    "F/F": "category-femslash",
+    "F/M": "category-het",
+    Gen: "category-gen",
+    "M/M": "category-slash",
+    Multi: "category-multi",
+    Other: "category-other",
+};
+
+const warningPriority = ["warning-choosenotto", "warning-no", "warning-yes"];
+
+function summarize(values: string[], icons: Record<string, string>, fallback: Icon, priority?: string[]): Icon {
+    if (values.length === 0) return fallback;
+    const present = new Set(values.map((value) => icons[value]));
+    const icon = priority?.find((candidate) => present.has(candidate)) ?? icons[values[0]] ?? fallback.icon;
+    return { icon, label: values.join(", ") };
+}
+
+const icons: Icon[] = [
+    { icon: ratingIcons[rating] ?? "rating-notrated", label: rating || "Not Rated" },
+    summarize(warnings, warningIcons, { icon: "warning-no", label: "No Archive Warnings Apply" }, warningPriority),
+    summarize(category, categoryIcons, { icon: "category-none", label: "No categories" }),
+    {
+        icon: isCompleted ? "complete-yes" : "complete-no",
+        label: isCompleted ? "Complete Work" : "Work in Progress",
+    },
+];
+---
+
+<ul class="grid w-fit grid-cols-2 gap-0.5">
+    {icons.map(({ icon, label }) => (
+        <li class="size-6.25" title={label}>
+            <img class="size-full" src={`/symbols/${icon}.png`} alt={label} />
+        </li>
+    ))}
+</ul>

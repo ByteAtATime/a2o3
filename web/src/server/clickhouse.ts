@@ -9,15 +9,15 @@ const workSummaryFields = {
 	fandoms: z.array(z.string()),
 	words: nullableCount,
 	kudos: nullableCount,
+	rating: z.string(),
+	warnings: z.array(z.string()),
+	category: z.array(z.string()),
+	is_completed: z.boolean(),
 };
 
 const workDetailFields = {
 	...workSummaryFields,
-	rating: z.string(),
-	warnings: z.array(z.string()),
-	category: z.array(z.string()),
 	language: z.string(),
-	is_completed: z.boolean(),
 	relationships: z.array(z.string()),
 	characters: z.array(z.string()),
 	freeform_tags: z.array(z.string()),
