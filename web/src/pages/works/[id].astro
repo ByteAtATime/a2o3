@@ -72,7 +72,7 @@ const stats = [
             ))}
 
             {work.summary && <p>{work.summary}</p>}
-            {proseHtml && <div set:html={proseHtml} />}
+            {proseHtml && <div set:html={proseHtml} class="prose" />}
         </article>
     </body>
 </html>
