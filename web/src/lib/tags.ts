@@ -16,9 +16,11 @@ const slugEscapes: Record<string, string> = {
   "*u*": "_",
 };
 
-export const formatTag = (tag: string): string => tag.replace(/\*[a-qs-z]\*/g, (code) => slugEscapes[code] ?? code);
+export const formatTag = (tag: string): string =>
+  tag.replace(/\*[a-qs-z]\*/g, (code) => slugEscapes[code] ?? code);
 
-export const tagPath = (tag: string): string => `/tags/${encodeURIComponent(tag)}`;
+export const tagPath = (tag: string): string =>
+  `/tags/${encodeURIComponent(tag)}`;
 
 export const parseTag = (tag: string): { label: string; href: string } => ({
   label: formatTag(tag),

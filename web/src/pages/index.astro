@@ -9,26 +9,30 @@ const works = await listWorks();
 
 <!doctype html>
 <html lang="en">
-    <head>
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width" />
-        <title>Works</title>
-    </head>
-    <body>
-        <main class="mx-auto max-w-3xl px-2 py-4">
-            <div class="mb-4 flex items-center justify-between">
-                <h1 class="text-xl font-semibold">Works</h1>
-                <a href="/works/search" class="text-sm text-blue-700 underline">Work Search</a>
-            </div>
-            <ul>
-                {works.map((work, i) => (
-                    <>
-                        <WorkBlurb work={work} summary={cleanSummary(work.summary ?? "")} />
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>Works</title>
+  </head>
+  <body>
+    <main class="mx-auto max-w-3xl px-2 py-4">
+      <div class="mb-4 flex items-center justify-between">
+        <h1 class="text-xl font-semibold">Works</h1>
+        <a href="/works/search" class="text-sm text-blue-700 underline">
+          Work Search
+        </a>
+      </div>
+      <ul>
+        {works.map((work, i) => (
+          <>
+            <WorkBlurb work={work} summary={cleanSummary(work.summary ?? "")} />
 
-                        {i < works.length - 1 && <li class="border-b border-slate-300" aria-hidden="true"></li>}
-                    </>
-                ))}
-            </ul>
-        </main>
-    </body>
+            {i < works.length - 1 && (
+              <li class="border-b border-slate-300" aria-hidden="true"></li>
+            )}
+          </>
+        ))}
+      </ul>
+    </main>
+  </body>
 </html>

@@ -2,7 +2,12 @@
 import "../../styles/global.css";
 import ModeTable from "../../components/ModeTable.astro";
 import TagPicker from "../../components/TagPicker.svelte";
-import { listLanguages, parseSearchParams, searchWorks, searchOptions } from "../../server/clickhouse";
+import {
+  listLanguages,
+  parseSearchParams,
+  searchWorks,
+  searchOptions,
+} from "../../server/clickhouse";
 import { cleanSummary } from "../../lib/tags";
 import WorkBlurb from "../../components/WorkBlurb.astro";
 
@@ -12,24 +17,25 @@ const result = await searchWorks(params);
 const number = new Intl.NumberFormat("en-US");
 
 const inputClass =
-    "w-full rounded border border-slate-300 bg-white px-2 py-1 text-sm focus:border-slate-500 focus:outline-none";
+  "w-full rounded border border-slate-300 bg-white px-2 py-1 text-sm focus:border-slate-500 focus:outline-none";
 const submitClass =
-    "cursor-pointer rounded border border-slate-400 bg-slate-100 px-4 py-1 text-sm font-medium hover:bg-slate-200";
+  "cursor-pointer rounded border border-slate-400 bg-slate-100 px-4 py-1 text-sm font-medium hover:bg-slate-200";
 
 const hasFilter = (name: string, value: string) =>
-    name === "complete"
-        ? (params.complete ?? "") === value
-        : name === "crossover"
-          ? (params.crossover ?? "") === value
-          : false;
+  name === "complete"
+    ? (params.complete ?? "") === value
+    : name === "crossover"
+      ? (params.crossover ?? "") === value
+      : false;
 const languages = await listLanguages();
 
-const hasCheckbox = (list: string[] | undefined, value: string) => list?.includes(value) ?? false;
+const hasCheckbox = (list: string[] | undefined, value: string) =>
+  list?.includes(value) ?? false;
 
 const pageHref = (page: number): string => {
-    const sp = new URLSearchParams(Astro.url.searchParams);
-    sp.set("page", String(page));
-    return `/works/search?${sp.toString()}`;
+  const sp = new URLSearchParams(Astro.url.searchParams);
+  sp.set("page", String(page));
+  return `/works/search?${sp.toString()}`;
 };
 
 const firstResult = (result.page - 1) * 20 + 1;
@@ -38,263 +44,323 @@ const lastResult = Math.min(result.page * 20, result.total);
 
 <!doctype html>
 <html lang="en">
-    <head>
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width" />
-        <title>Work Search</title>
-    </head>
-    <body>
-        <main class="mx-auto max-w-3xl px-2 py-4 space-y-6">
-            <h1 class="text-xl font-semibold">Work Search</h1>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>Work Search</title>
+  </head>
+  <body>
+    <main class="mx-auto max-w-3xl px-2 py-4 space-y-6">
+      <h1 class="text-xl font-semibold">Work Search</h1>
 
-            <form method="get" action="/works/search" class="space-y-4">
-                <fieldset class="space-y-3 rounded border border-slate-300 p-3">
-                    <legend class="px-1 mb-0 text-sm font-semibold">Work Info</legend>
-                    <div class="grid gap-3 sm:grid-cols-2">
-                        <label class="block space-y-1 text-sm">
-                            <span>Any Field</span>
-                            <input type="text" name="query" value={params.query ?? ""} class={inputClass} />
-                        </label>
-                        <label class="block space-y-1 text-sm">
-                            <span>Title</span>
-                            <input type="text" name="title" value={params.title ?? ""} class={inputClass} />
-                        </label>
-                        <label class="block space-y-1 text-sm">
-                            <span>Creator</span>
-                            <input type="text" name="creators" value={params.creators ?? ""} class={inputClass} />
-                        </label>
-                        <label class="block space-y-1 text-sm">
-                            <span>Date (e.g. &gt;2020-01-01, 2022)</span>
-                            <input type="text" name="revised_at" value={params.revisedAt ?? ""} class={inputClass} />
-                        </label>
-                    </div>
+      <form method="get" action="/works/search" class="space-y-4">
+        <fieldset class="space-y-3 rounded border border-slate-300 p-3">
+          <legend class="px-1 mb-0 text-sm font-semibold">Work Info</legend>
+          <div class="grid gap-3 sm:grid-cols-2">
+            <label class="block space-y-1 text-sm">
+              <span>Any Field</span>
+              <input
+                type="text"
+                name="query"
+                value={params.query ?? ""}
+                class={inputClass}
+              />
+            </label>
+            <label class="block space-y-1 text-sm">
+              <span>Title</span>
+              <input
+                type="text"
+                name="title"
+                value={params.title ?? ""}
+                class={inputClass}
+              />
+            </label>
+            <label class="block space-y-1 text-sm">
+              <span>Creator</span>
+              <input
+                type="text"
+                name="creators"
+                value={params.creators ?? ""}
+                class={inputClass}
+              />
+            </label>
+            <label class="block space-y-1 text-sm">
+              <span>Date (e.g. &gt;2020-01-01, 2022)</span>
+              <input
+                type="text"
+                name="revised_at"
+                value={params.revisedAt ?? ""}
+                class={inputClass}
+              />
+            </label>
+          </div>
 
-                    <div class="grid gap-3 sm:grid-cols-3 text-sm">
-                        <fieldset>
-                            <legend>Completion status</legend>
-                            <label class="block">
-                                <input type="radio" name="complete" value="" checked={hasFilter("complete", "")} /> All
-                                works
-                            </label>
-                            <label class="block">
-                                <input type="radio" name="complete" value="T" checked={hasFilter("complete", "T")} />{" "}
-                                Complete works only
-                            </label>
-                            <label class="block">
-                                <input type="radio" name="complete" value="F" checked={hasFilter("complete", "F")} />{" "}
-                                Works in progress only
-                            </label>
-                        </fieldset>
-                        <fieldset>
-                            <legend>Crossovers</legend>
-                            <label class="block">
-                                <input type="radio" name="crossover" value="" checked={hasFilter("crossover", "")} />{" "}
-                                Include crossovers
-                            </label>
-                            <label class="block">
-                                <input type="radio" name="crossover" value="F" checked={hasFilter("crossover", "F")} />{" "}
-                                Exclude crossovers
-                            </label>
-                            <label class="block">
-                                <input type="radio" name="crossover" value="T" checked={hasFilter("crossover", "T")} />{" "}
-                                Only crossovers
-                            </label>
-                        </fieldset>
-                        <div class="space-y-3">
-                            <label class="block">
-                                <input type="checkbox" name="single_chapter" value="1" checked={params.singleChapter} />{" "}
-                                Single Chapter
-                            </label>
-                            <label class="block space-y-1">
-                                <span>Word Count (e.g. &gt;1000, 100-5000)</span>
-                                <input
-                                    type="text"
-                                    name="word_count"
-                                    value={params.wordCount ?? ""}
-                                    class={inputClass}
-                                />
-                            </label>
-                        </div>
-                    </div>
+          <div class="grid gap-3 sm:grid-cols-3 text-sm">
+            <fieldset>
+              <legend>Completion status</legend>
+              <label class="block">
+                <input
+                  type="radio"
+                  name="complete"
+                  value=""
+                  checked={hasFilter("complete", "")}
+                />{" "}
+                All works
+              </label>
+              <label class="block">
+                <input
+                  type="radio"
+                  name="complete"
+                  value="T"
+                  checked={hasFilter("complete", "T")}
+                />{" "}
+                Complete works only
+              </label>
+              <label class="block">
+                <input
+                  type="radio"
+                  name="complete"
+                  value="F"
+                  checked={hasFilter("complete", "F")}
+                />{" "}
+                Works in progress only
+              </label>
+            </fieldset>
+            <fieldset>
+              <legend>Crossovers</legend>
+              <label class="block">
+                <input
+                  type="radio"
+                  name="crossover"
+                  value=""
+                  checked={hasFilter("crossover", "")}
+                />{" "}
+                Include crossovers
+              </label>
+              <label class="block">
+                <input
+                  type="radio"
+                  name="crossover"
+                  value="F"
+                  checked={hasFilter("crossover", "F")}
+                />{" "}
+                Exclude crossovers
+              </label>
+              <label class="block">
+                <input
+                  type="radio"
+                  name="crossover"
+                  value="T"
+                  checked={hasFilter("crossover", "T")}
+                />{" "}
+                Only crossovers
+              </label>
+            </fieldset>
+            <div class="space-y-3">
+              <label class="block">
+                <input
+                  type="checkbox"
+                  name="single_chapter"
+                  value="1"
+                  checked={params.singleChapter}
+                />{" "}
+                Single Chapter
+              </label>
+              <label class="block space-y-1">
+                <span>Word Count (e.g. &gt;1000, 100-5000)</span>
+                <input
+                  type="text"
+                  name="word_count"
+                  value={params.wordCount ?? ""}
+                  class={inputClass}
+                />
+              </label>
+            </div>
+          </div>
 
-                    <label class="block space-y-1 text-sm sm:w-1/2">
-                        <span>Language</span>
-                        <select name="language_id" class={inputClass}>
-                            <option value="" selected={!params.language}></option>
-                            {languages.map((language) => (
-                                <option value={language} selected={params.language === language}>
-                                    {language}
-                                </option>
-                            ))}
-                        </select>
-                    </label>
-                </fieldset>
+          <label class="block space-y-1 text-sm sm:w-1/2">
+            <span>Language</span>
+            <select name="language_id" class={inputClass}>
+              <option value="" selected={!params.language}></option>
+              {languages.map((language) => (
+                <option
+                  value={language}
+                  selected={params.language === language}
+                >
+                  {language}
+                </option>
+              ))}
+            </select>
+          </label>
+        </fieldset>
 
-                <fieldset class="space-y-3 rounded border border-slate-300 p-3">
-                    <legend class="px-1 mb-0 text-sm font-semibold">Work Tags</legend>
-                    <div class="grid gap-3 sm:grid-cols-2">
-                        <div class="space-y-1 text-sm">
-                            <span>Fandoms</span>
-                            <TagPicker
-                                client:load
-                                inputClass={inputClass}
-                                name="fandom_names"
-                                type="fandom"
-                                initial={params.fandoms ?? ""}
-                                placeholder="Type for suggestions..."
-                            />
-                        </div>
-                        <div class="space-y-1 text-sm">
-                            <span>Characters</span>
-                            <TagPicker
-                                client:load
-                                inputClass={inputClass}
-                                name="character_names"
-                                type="character"
-                                initial={params.characters ?? ""}
-                                placeholder="Type for suggestions..."
-                            />
-                        </div>
-                        <div class="space-y-1 text-sm">
-                            <span>Relationships</span>
-                            <TagPicker
-                                client:load
-                                inputClass={inputClass}
-                                name="relationship_names"
-                                type="relationship"
-                                initial={params.relationships ?? ""}
-                                placeholder="Type for suggestions..."
-                            />
-                        </div>
-                        <div class="space-y-1 text-sm">
-                            <span>Additional Tags</span>
-                            <TagPicker
-                                client:load
-                                inputClass={inputClass}
-                                name="freeform_names"
-                                type="freeform"
-                                initial={params.freeforms ?? ""}
-                                placeholder="Type for suggestions..."
-                            />
-                        </div>
-                    </div>
+        <fieldset class="space-y-3 rounded border border-slate-300 p-3">
+          <legend class="px-1 mb-0 text-sm font-semibold">Work Tags</legend>
+          <div class="grid gap-3 sm:grid-cols-2">
+            <div class="space-y-1 text-sm">
+              <span>Fandoms</span>
+              <TagPicker
+                client:load
+                inputClass={inputClass}
+                name="fandom_names"
+                type="fandom"
+                initial={params.fandoms ?? ""}
+                placeholder="Type for suggestions..."
+              />
+            </div>
+            <div class="space-y-1 text-sm">
+              <span>Characters</span>
+              <TagPicker
+                client:load
+                inputClass={inputClass}
+                name="character_names"
+                type="character"
+                initial={params.characters ?? ""}
+                placeholder="Type for suggestions..."
+              />
+            </div>
+            <div class="space-y-1 text-sm">
+              <span>Relationships</span>
+              <TagPicker
+                client:load
+                inputClass={inputClass}
+                name="relationship_names"
+                type="relationship"
+                initial={params.relationships ?? ""}
+                placeholder="Type for suggestions..."
+              />
+            </div>
+            <div class="space-y-1 text-sm">
+              <span>Additional Tags</span>
+              <TagPicker
+                client:load
+                inputClass={inputClass}
+                name="freeform_names"
+                type="freeform"
+                initial={params.freeforms ?? ""}
+                placeholder="Type for suggestions..."
+              />
+            </div>
+          </div>
 
-                    <details class="text-sm">
-                        <summary class="cursor-pointer text-slate-700">Rating</summary>
-                        <ModeTable
-                            rows={searchOptions.ratings}
-                            includeName="rating_include[]"
-                            excludeName="rating_exclude[]"
-                            includeList={params.ratings.include}
-                            excludeList={params.ratings.exclude}
-                        />
-                    </details>
+          <details class="text-sm">
+            <summary class="cursor-pointer text-slate-700">Rating</summary>
+            <ModeTable
+              rows={searchOptions.ratings}
+              includeName="rating_include[]"
+              excludeName="rating_exclude[]"
+              includeList={params.ratings.include}
+              excludeList={params.ratings.exclude}
+            />
+          </details>
 
-                    <details class="text-sm">
-                        <summary class="cursor-pointer text-slate-700">Warnings</summary>
-                        <ModeTable
-                            rows={searchOptions.warnings}
-                            includeName="warning_include[]"
-                            excludeName="warning_exclude[]"
-                            includeList={params.warnings.include}
-                            excludeList={params.warnings.exclude}
-                        />
-                    </details>
+          <details class="text-sm">
+            <summary class="cursor-pointer text-slate-700">Warnings</summary>
+            <ModeTable
+              rows={searchOptions.warnings}
+              includeName="warning_include[]"
+              excludeName="warning_exclude[]"
+              includeList={params.warnings.include}
+              excludeList={params.warnings.exclude}
+            />
+          </details>
 
-                    <fieldset>
-                        <legend>Categories</legend>
-                        {searchOptions.categories.map((category) => (
-                            <label class="block">
-                                <input
-                                    type="checkbox"
-                                    name="category_ids[]"
-                                    value={category}
-                                    checked={hasCheckbox(params.categories, category)}
-                                />{" "}
-                                {category}
-                            </label>
-                        ))}
-                    </fieldset>
-                </fieldset>
+          <fieldset>
+            <legend>Categories</legend>
+            {searchOptions.categories.map((category) => (
+              <label class="block">
+                <input
+                  type="checkbox"
+                  name="category_ids[]"
+                  value={category}
+                  checked={hasCheckbox(params.categories, category)}
+                />{" "}
+                {category}
+              </label>
+            ))}
+          </fieldset>
+        </fieldset>
 
-                <fieldset class="flex flex-wrap items-end gap-3 rounded border border-slate-300 p-3">
-                    <legend class="px-1 text-sm font-semibold">Search</legend>
-                    <label class="block space-y-1 text-sm">
-                        <span>Sort by</span>
-                        <select name="sort_column" class={inputClass}>
-                            {searchOptions.sortColumns.map((column) => (
-                                <option value={column} selected={params.sortColumn === column}>
-                                    {
-                                        {
-                                            relevance: "Newest",
-                                            authors_to_sort_on: "Creator",
-                                            title_to_sort_on: "Title",
-                                            created_at: "Date Posted",
-                                            revised_at: "Date Updated",
-                                            word_count: "Word Count",
-                                            kudos_count: "Kudos",
-                                            comments_count: "Comments",
-                                            bookmarks_count: "Bookmarks",
-                                            hits: "Hits",
-                                        }[column]
-                                    }
-                                </option>
-                            ))}
-                        </select>
-                    </label>
-                    <label class="block space-y-1 text-sm">
-                        <span>Sort direction</span>
-                        <select name="sort_direction" class={inputClass}>
-                            <option value="desc" selected={params.sortDirection === "desc"}>
-                                Descending
-                            </option>
-                            <option value="asc" selected={params.sortDirection === "asc"}>
-                                Ascending
-                            </option>
-                        </select>
-                    </label>
-                    <input type="submit" value="Search" class={submitClass} />
-                </fieldset>
-            </form>
+        <fieldset class="flex flex-wrap items-end gap-3 rounded border border-slate-300 p-3">
+          <legend class="px-1 text-sm font-semibold">Search</legend>
+          <label class="block space-y-1 text-sm">
+            <span>Sort by</span>
+            <select name="sort_column" class={inputClass}>
+              {searchOptions.sortColumns.map((column) => (
+                <option value={column} selected={params.sortColumn === column}>
+                  {
+                    {
+                      relevance: "Newest",
+                      authors_to_sort_on: "Creator",
+                      title_to_sort_on: "Title",
+                      created_at: "Date Posted",
+                      revised_at: "Date Updated",
+                      word_count: "Word Count",
+                      kudos_count: "Kudos",
+                      comments_count: "Comments",
+                      bookmarks_count: "Bookmarks",
+                      hits: "Hits",
+                    }[column]
+                  }
+                </option>
+              ))}
+            </select>
+          </label>
+          <label class="block space-y-1 text-sm">
+            <span>Sort direction</span>
+            <select name="sort_direction" class={inputClass}>
+              <option value="desc" selected={params.sortDirection === "desc"}>
+                Descending
+              </option>
+              <option value="asc" selected={params.sortDirection === "asc"}>
+                Ascending
+              </option>
+            </select>
+          </label>
+          <input type="submit" value="Search" class={submitClass} />
+        </fieldset>
+      </form>
 
-            <p class="text-sm text-slate-600">
-                {result.total === 0
-                    ? "No works found."
-                    : `${number.format(firstResult)} - ${number.format(lastResult)} of ${number.format(result.total)}`}
-            </p>
+      <p class="text-sm text-slate-600">
+        {result.total === 0
+          ? "No works found."
+          : `${number.format(firstResult)} - ${number.format(lastResult)} of ${number.format(result.total)}`}
+      </p>
 
-            <ul>
-                {result.works.map((work, i) => (
-                    <>
-                        <WorkBlurb work={work} summary={cleanSummary(work.summary ?? "")} />
-                        {i < result.works.length - 1 && <li class="border-b border-slate-300" aria-hidden="true"></li>}
-                    </>
-                ))}
-            </ul>
-
-            {result.pageCount > 1 && (
-                <nav class="flex items-center gap-2 text-sm" aria-label="Pagination">
-                    {result.page > 1 && (
-                        <a
-                            class="rounded border border-slate-300 px-2 py-1 hover:bg-slate-100"
-                            href={pageHref(result.page - 1)}
-                        >
-                            Previous
-                        </a>
-                    )}
-                    <span>
-                        Page {result.page} of {number.format(result.pageCount)}
-                    </span>
-                    {result.page < result.pageCount && (
-                        <a
-                            class="rounded border border-slate-300 px-2 py-1 hover:bg-slate-100"
-                            href={pageHref(result.page + 1)}
-                        >
-                            Next
-                        </a>
-                    )}
-                </nav>
+      <ul>
+        {result.works.map((work, i) => (
+          <>
+            <WorkBlurb work={work} summary={cleanSummary(work.summary ?? "")} />
+            {i < result.works.length - 1 && (
+              <li class="border-b border-slate-300" aria-hidden="true"></li>
             )}
-        </main>
-    </body>
+          </>
+        ))}
+      </ul>
+
+      {result.pageCount > 1 && (
+        <nav class="flex items-center gap-2 text-sm" aria-label="Pagination">
+          {result.page > 1 && (
+            <a
+              class="rounded border border-slate-300 px-2 py-1 hover:bg-slate-100"
+              href={pageHref(result.page - 1)}
+            >
+              Previous
+            </a>
+          )}
+          <span>
+            Page {result.page} of {number.format(result.pageCount)}
+          </span>
+          {result.page < result.pageCount && (
+            <a
+              class="rounded border border-slate-300 px-2 py-1 hover:bg-slate-100"
+              href={pageHref(result.page + 1)}
+            >
+              Next
+            </a>
+          )}
+        </nav>
+      )}
+    </main>
+  </body>
 </html>

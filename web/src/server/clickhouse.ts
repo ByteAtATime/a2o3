@@ -100,15 +100,23 @@ const workPageQuery = (ids: string, order: string): string => `
 
 const listLimit = 200;
 
-const clickHouseUrl = (): string => process.env.CH_URL ?? "http://localhost:8123";
+const clickHouseUrl = (): string =>
+  process.env.CH_URL ?? "http://localhost:8123";
 
-const runQuery = async (sql: string, params: Record<string, string> = {}): Promise<unknown[]> => {
+const runQuery = async (
+  sql: string,
+  params: Record<string, string> = {},
+): Promise<unknown[]> => {
   const url = new URL(clickHouseUrl());
   url.searchParams.set("query", `${sql} FORMAT JSON`);
-  for (const [name, value] of Object.entries(params)) url.searchParams.set(`param_${name}`, value);
+  for (const [name, value] of Object.entries(params))
+    url.searchParams.set(`param_${name}`, value);
   const response = await fetch(url);
-  if (!response.ok) throw new Error(`ClickHouse ${response.status}: ${await response.text()}`);
-  const body = z.object({ data: z.array(z.unknown()) }).parse(await response.json());
+  if (!response.ok)
+    throw new Error(`ClickHouse ${response.status}: ${await response.text()}`);
+  const body = z
+    .object({ data: z.array(z.unknown()) })
+    .parse(await response.json());
   return body.data;
 };
 
@@ -128,8 +136,11 @@ const paramBuilder = () => {
 const likePattern = (value: string): string =>
   `%${value.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_")}%`;
 
-const like = (b: ReturnType<typeof paramBuilder>, column: string, value: string): string =>
-  `${column} ILIKE ${b.bind(likePattern(value))}`;
+const like = (
+  b: ReturnType<typeof paramBuilder>,
+  column: string,
+  value: string,
+): string => `${column} ILIKE ${b.bind(likePattern(value))}`;
 
 const splitList = (value: string | undefined): string[] =>
   (value ?? "")
@@ -137,7 +148,10 @@ const splitList = (value: string | undefined): string[] =>
     .map((name) => name.trim())
     .filter((name) => name !== "");
 
-const numericCondition = (column: string, input: string | undefined): string | null => {
+const numericCondition = (
+  column: string,
+  input: string | undefined,
+): string | null => {
   const value = input?.trim();
   if (!value) return null;
   const range = value.match(/^(\d+)\s*-\s*(\d+)$/);
@@ -163,7 +177,13 @@ const dateCondition = (
   return `coalesce(${column}, published_date) ${op} toDate(${b.bind(operand)})`;
 };
 
-const SEARCH_RATINGS = ["Not Rated", "General Audiences", "Teen And Up Audiences", "Mature", "Explicit"] as const;
+const SEARCH_RATINGS = [
+  "Not Rated",
+  "General Audiences",
+  "Teen And Up Audiences",
+  "Mature",
+  "Explicit",
+] as const;
 const SEARCH_WARNINGS = [
   "Creator Chose Not To Use Archive Warnings",
   "Graphic Depictions Of Violence",
@@ -172,7 +192,14 @@ const SEARCH_WARNINGS = [
   "Rape/Non-Con",
   "Underage Sex",
 ] as const;
-const SEARCH_CATEGORIES = ["F/F", "F/M", "Gen", "M/M", "Multi", "Other"] as const;
+const SEARCH_CATEGORIES = [
+  "F/F",
+  "F/M",
+  "Gen",
+  "M/M",
+  "Multi",
+  "Other",
+] as const;
 
 const SORT_COLUMNS = {
   relevance: null as null | string,
@@ -222,11 +249,15 @@ const modeLists = (
   allowed: readonly string[],
 ) => {
   const pick = (key: string): string[] =>
-    (searchParams.getAll(key) ?? []).filter((v): v is string => (allowed as readonly string[]).includes(v));
+    (searchParams.getAll(key) ?? []).filter((v): v is string =>
+      (allowed as readonly string[]).includes(v),
+    );
   return { include: pick(includeKey), exclude: pick(excludeKey) };
 };
 
-export const parseSearchParams = (searchParams: URLSearchParams): SearchParams => {
+export const parseSearchParams = (
+  searchParams: URLSearchParams,
+): SearchParams => {
   const get = (key: string): string | undefined => {
     const value = searchParams.get(key) ?? undefined;
     return value !== undefined && value.trim() !== "" ? value : undefined;
@@ -245,28 +276,48 @@ export const parseSearchParams = (searchParams: URLSearchParams): SearchParams =
     characters: get("character_names"),
     relationships: get("relationship_names"),
     freeforms: get("freeform_names"),
-    ratings: modeLists(searchParams, "rating_include[]", "rating_exclude[]", SEARCH_RATINGS),
-    warnings: modeLists(searchParams, "warning_include[]", "warning_exclude[]", SEARCH_WARNINGS),
-    categories: (searchParams.getAll("category_ids[]") ?? []).filter((c): c is (typeof SEARCH_CATEGORIES)[number] =>
-      (SEARCH_CATEGORIES as readonly string[]).includes(c),
+    ratings: modeLists(
+      searchParams,
+      "rating_include[]",
+      "rating_exclude[]",
+      SEARCH_RATINGS,
     ),
-    sortColumn: oneOf(Object.keys(SORT_COLUMNS) as SortColumn[])(get("sort_column") ?? "") ?? "relevance",
+    warnings: modeLists(
+      searchParams,
+      "warning_include[]",
+      "warning_exclude[]",
+      SEARCH_WARNINGS,
+    ),
+    categories: (searchParams.getAll("category_ids[]") ?? []).filter(
+      (c): c is (typeof SEARCH_CATEGORIES)[number] =>
+        (SEARCH_CATEGORIES as readonly string[]).includes(c),
+    ),
+    sortColumn:
+      oneOf(Object.keys(SORT_COLUMNS) as SortColumn[])(
+        get("sort_column") ?? "",
+      ) ?? "relevance",
     sortDirection: get("sort_direction") === "asc" ? "asc" : "desc",
     page: Math.max(1, Number.parseInt(get("page") ?? "1", 10) || 1),
   };
 };
 
-const buildWhere = (params: SearchParams): { sql: string; params: Record<string, string> } => {
+const buildWhere = (
+  params: SearchParams,
+): { sql: string; params: Record<string, string> } => {
   const b = paramBuilder();
   const conditions: string[] = [];
 
   if (params.query) {
     const q = b.bind(likePattern(params.query));
-    conditions.push(`(title ILIKE ${q} OR summary ILIKE ${q} OR arrayExists(name -> name ILIKE ${q}, authors))`);
+    conditions.push(
+      `(title ILIKE ${q} OR summary ILIKE ${q} OR arrayExists(name -> name ILIKE ${q}, authors))`,
+    );
   }
   if (params.title) conditions.push(like(b, "title", params.title));
   if (params.creators) {
-    conditions.push(`arrayExists(name -> name ILIKE ${b.bind(likePattern(params.creators))}, authors)`);
+    conditions.push(
+      `arrayExists(name -> name ILIKE ${b.bind(likePattern(params.creators))}, authors)`,
+    );
   }
 
   const dateCond = dateCondition(b, "updated_date", params.revisedAt);
@@ -282,7 +333,11 @@ const buildWhere = (params: SearchParams): { sql: string; params: Record<string,
   if (wordCond) conditions.push(wordCond);
   if (params.language) conditions.push(`language = ${b.bind(params.language)}`);
 
-  const tagFilter = (column: string, type: string, names: string[]): string | null => {
+  const tagFilter = (
+    column: string,
+    type: string,
+    names: string[],
+  ): string | null => {
     if (names.length === 0) return null;
     const type_ = b.bind(type);
 
@@ -305,18 +360,27 @@ const buildWhere = (params: SearchParams): { sql: string; params: Record<string,
   }
 
   if (params.ratings.include.length > 0) {
-    conditions.push(`rating IN ([${params.ratings.include.map((r) => b.bind(r)).join(", ")}])`);
+    conditions.push(
+      `rating IN ([${params.ratings.include.map((r) => b.bind(r)).join(", ")}])`,
+    );
   }
   if (params.ratings.exclude.length > 0) {
-    conditions.push(`rating NOT IN ([${params.ratings.exclude.map((r) => b.bind(r)).join(", ")}])`);
+    conditions.push(
+      `rating NOT IN ([${params.ratings.exclude.map((r) => b.bind(r)).join(", ")}])`,
+    );
   }
   if (params.warnings.include.length > 0) {
-    conditions.push(`hasAll(warnings, [${params.warnings.include.map((w) => b.bind(w)).join(", ")}])`);
+    conditions.push(
+      `hasAll(warnings, [${params.warnings.include.map((w) => b.bind(w)).join(", ")}])`,
+    );
   }
   if (params.warnings.exclude.length > 0) {
-    conditions.push(`NOT hasAny(warnings, [${params.warnings.exclude.map((w) => b.bind(w)).join(", ")}])`);
+    conditions.push(
+      `NOT hasAny(warnings, [${params.warnings.exclude.map((w) => b.bind(w)).join(", ")}])`,
+    );
   }
-  for (const category of params.categories ?? []) conditions.push(`has(category, ${b.bind(category)})`);
+  for (const category of params.categories ?? [])
+    conditions.push(`has(category, ${b.bind(category)})`);
 
   return {
     sql: conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "",
@@ -331,11 +395,14 @@ export type SearchResult = {
   pageCount: number;
 };
 
-export const searchWorks = async (params: SearchParams): Promise<SearchResult> => {
+export const searchWorks = async (
+  params: SearchParams,
+): Promise<SearchResult> => {
   const { sql: where, params: bindParams } = buildWhere(params);
 
   const sortExpression =
-    SORT_COLUMNS[params.sortColumn ?? "relevance"] ?? (params.sortColumn === "authors_to_sort_on" ? "title" : null);
+    SORT_COLUMNS[params.sortColumn ?? "relevance"] ??
+    (params.sortColumn === "authors_to_sort_on" ? "title" : null);
   const direction = params.sortDirection === "asc" ? "ASC" : "DESC";
   const orderBy = sortExpression
     ? `ORDER BY ${sortExpression} ${direction}, work_id ${direction}`
@@ -344,13 +411,23 @@ export const searchWorks = async (params: SearchParams): Promise<SearchResult> =
   const offset = ((params.page ?? 1) - 1) * pageSize;
 
   const [idRows, totals] = await Promise.all([
-    runQuery(`SELECT work_id FROM works ${where} ${orderBy} LIMIT ${pageSize} OFFSET ${offset}`, bindParams),
+    runQuery(
+      `SELECT work_id FROM works ${where} ${orderBy} LIMIT ${pageSize} OFFSET ${offset}`,
+      bindParams,
+    ),
     runQuery(`SELECT count() AS total FROM works ${where}`, bindParams),
   ]);
   const total = z.object({ total: z.number().int() }).parse(totals[0]).total;
-  const ids = z.array(z.number().int()).parse(idRows.map((r) => (r as { work_id: number }).work_id));
+  const ids = z
+    .array(z.number().int())
+    .parse(idRows.map((r) => (r as { work_id: number }).work_id));
   if (ids.length === 0) {
-    return { works: [], total, page: params.page ?? 1, pageCount: Math.max(1, Math.ceil(total / pageSize)) };
+    return {
+      works: [],
+      total,
+      page: params.page ?? 1,
+      pageCount: Math.max(1, Math.ceil(total / pageSize)),
+    };
   }
   const rows = await runQuery(workPageQuery(ids.join(", "), orderBy));
   return {
@@ -369,14 +446,22 @@ export const searchOptions = {
 } as const;
 
 export const listWorks = async (): Promise<WorkDetail[]> => {
-  const idRows = await runQuery(`SELECT work_id FROM works ORDER BY work_id DESC LIMIT ${listLimit}`);
-  const ids = z.array(z.number().int()).parse(idRows.map((r) => (r as { work_id: number }).work_id));
+  const idRows = await runQuery(
+    `SELECT work_id FROM works ORDER BY work_id DESC LIMIT ${listLimit}`,
+  );
+  const ids = z
+    .array(z.number().int())
+    .parse(idRows.map((r) => (r as { work_id: number }).work_id));
   if (ids.length === 0) return [];
-  const rows = await runQuery(workPageQuery(ids.join(", "), "ORDER BY work_id DESC"));
+  const rows = await runQuery(
+    workPageQuery(ids.join(", "), "ORDER BY work_id DESC"),
+  );
   return rows.map((row) => workDetailSchema.parse(row));
 };
 
-export const findWork = async (workId: number): Promise<WorkDetail | undefined> => {
+export const findWork = async (
+  workId: number,
+): Promise<WorkDetail | undefined> => {
   const rows = await runQuery(workPageQuery(String(workId), ""));
   const [row] = rows;
   if (row === undefined) return undefined;
@@ -386,19 +471,29 @@ export const findWork = async (workId: number): Promise<WorkDetail | undefined> 
 let languagesCache: Promise<string[]> | undefined;
 
 export const listLanguages = async (): Promise<string[]> => {
-  languagesCache ??= runQuery("SELECT DISTINCT language FROM works WHERE language != '' ORDER BY language").then(
-    (rows) => rows.map((row) => z.object({ language: z.string() }).parse(row).language),
+  languagesCache ??= runQuery(
+    "SELECT DISTINCT language FROM works WHERE language != '' ORDER BY language",
+  ).then((rows) =>
+    rows.map((row) => z.object({ language: z.string() }).parse(row).language),
   );
   return languagesCache;
 };
 
-export const AUTOCOMPLETE_TYPES = ["fandom", "character", "relationship", "freeform"] as const;
+export const AUTOCOMPLETE_TYPES = [
+  "fandom",
+  "character",
+  "relationship",
+  "freeform",
+] as const;
 export type AutocompleteType = (typeof AUTOCOMPLETE_TYPES)[number];
 
 const autocompleteCache = new Map<string, Promise<string[]>>();
 const autocompleteCacheMax = 200;
 
-export const autocompleteTags = async (type: AutocompleteType, term: string): Promise<string[]> => {
+export const autocompleteTags = async (
+  type: AutocompleteType,
+  term: string,
+): Promise<string[]> => {
   const key = `${type}\u0000${term.toLowerCase()}`;
   let entry = autocompleteCache.get(key);
   if (entry === undefined) {
@@ -408,7 +503,9 @@ export const autocompleteTags = async (type: AutocompleteType, term: string): Pr
     entry = runQuery(
       "SELECT name FROM ao3_tags WHERE type = {t:String} AND name ILIKE {q:String} ORDER BY canonical DESC, name LIMIT 15",
       { t: type[0].toUpperCase() + type.slice(1), q: `%${term}%` },
-    ).then((rows) => rows.map((row) => z.object({ name: z.string() }).parse(row).name));
+    ).then((rows) =>
+      rows.map((row) => z.object({ name: z.string() }).parse(row).name),
+    );
     autocompleteCache.set(key, entry);
   }
   return entry;
