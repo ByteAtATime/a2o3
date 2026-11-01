@@ -3,7 +3,7 @@ CREATE TABLE IF NOT EXISTS works
     -- metadata
     work_id          UInt32 CODEC(Delta, ZSTD(6)),
     title            String CODEC(ZSTD(19)),
-    authors          Array(LowCardinality(String)) CODEC(ZSTD(19)),
+    author_ids       Array(UInt32) CODEC(ZSTD(6)),
 
     -- categories & stuff
     rating           LowCardinality(String) CODEC(ZSTD(6)),
@@ -13,10 +13,10 @@ CREATE TABLE IF NOT EXISTS works
     is_completed     Bool CODEC(ZSTD(6)),
 
     -- tags
-    fandoms          Array(LowCardinality(String)) CODEC(ZSTD(6)),
-    relationships    Array(LowCardinality(String)) CODEC(ZSTD(19)),
-    characters       Array(LowCardinality(String)) CODEC(ZSTD(19)),
-    freeform_tags    Array(LowCardinality(String)) CODEC(ZSTD(19)),
+    fandom_ids       Array(UInt32) CODEC(ZSTD(6)),
+    relationship_ids Array(UInt32) CODEC(ZSTD(6)),
+    character_ids    Array(UInt32) CODEC(ZSTD(6)),
+    freeform_ids     Array(UInt32) CODEC(ZSTD(6)),
 
     -- metrics
     words            Nullable(UInt32) CODEC(T64, ZSTD(6)),

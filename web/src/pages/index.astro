@@ -1,55 +1,30 @@
 ---
-import '../styles/global.css';
-import { listWorks } from '../server/clickhouse';
-import RequiredTags from '../components/RequiredTags.astro';
+import "../styles/global.css";
+import { listWorks } from "../server/clickhouse";
+import { cleanSummary } from "../lib/tags";
+import WorkBlurb from "../components/WorkBlurb.astro";
 
 const works = await listWorks();
-
-const number = new Intl.NumberFormat('en-US');
 ---
 
 <!doctype html>
 <html lang="en">
-	<head>
-		<meta charset="utf-8" />
-		<meta name="viewport" content="width=device-width" />
-		<title>Works</title>
-	</head>
-	<body>
-		<table>
-			<thead>
-				<tr>
-					<th>Symbols</th>
-					<th>Title</th>
-					<th>Authors</th>
-					<th>Fandoms</th>
-					<th>Words</th>
-					<th>Kudos</th>
-				</tr>
-			</thead>
-			<tbody>
-				{
-					works.map((work) => (
-						<tr>
-							<td>
-								<RequiredTags
-									rating={work.rating}
-									warnings={work.warnings}
-									category={work.category}
-									isCompleted={work.is_completed}
-								/>
-							</td>
-							<td>
-								<a href={`/works/${work.work_id}`}>{work.title}</a>
-							</td>
-							<td>{work.authors.join(', ')}</td>
-							<td>{work.fandoms.join(', ')}</td>
-							<td>{work.words === null ? '' : number.format(work.words)}</td>
-							<td>{work.kudos === null ? '' : number.format(work.kudos)}</td>
-						</tr>
-					))
-				}
-			</tbody>
-		</table>
-	</body>
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width" />
+        <title>Works</title>
+    </head>
+    <body>
+        <main class="mx-auto max-w-3xl px-2 py-4">
+            <ul>
+                {works.map((work, i) => (
+                    <>
+                        <WorkBlurb work={work} summary={cleanSummary(work.summary ?? "")} />
+
+                        {i < works.length - 1 && <li class="border-b border-slate-300" aria-hidden="true"></li>}
+                    </>
+                ))}
+            </ul>
+        </main>
+    </body>
 </html>
