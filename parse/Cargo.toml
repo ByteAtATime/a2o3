@@ -11,6 +11,10 @@ path = "src/parse.rs"
 name = "insert"
 path = "src/insert.rs"
 
+[[bin]]
+name = "pack"
+path = "src/pack.rs"
+
 [dependencies]
 zip = { version = "2", default-features = false, features = ["deflate"] }
 quick-xml = "0.37"
@@ -20,3 +24,5 @@ regex = "1"
 scraper = "0.22"
 sirocco = "0.3"
 rayon = "1"
+zstd = "0.14"
+zeekstd = "0.6"
