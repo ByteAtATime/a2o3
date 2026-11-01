@@ -1,3 +1,4 @@
+use quick_xml::{events::{BytesStart, Event}, Reader};
 use rayon::prelude::*;
 use regex::Regex;
 use std::{
@@ -40,26 +41,52 @@ static RE_TITLE_TAG: LazyLock<Regex> = LazyLock::new(|| {
 });
 static RE_TITLE_FALLBACK: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)<title>(.*?)</title>").unwrap());
-static RE_A_TAG: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?is)<a\s[^>]*href="([^"]*)"[^>]*>(.*?)</a>"#).unwrap()
-});
-static RE_EM_TAG: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)</?(?:em|i)>").unwrap());
-static RE_STRONG_TAG: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)</?(?:strong|b)>").unwrap());
-static RE_STRIKE_TAG: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)</?(?:s|strike|del)>").unwrap());
-static RE_CODE_TAG: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)</?code>").unwrap());
-static RE_Q_OPEN_TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)<q>").unwrap());
-static RE_Q_CLOSE_TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)</q>").unwrap());
-static RE_TAG_PASS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)(<br\s*/?>)|(<hr\s*/?>)|(</(?:p|div|h[1-6]|blockquote|li|ul|ol|section|article|pre|details|summary|figure|figcaption|center)\b[^>]*>)|(<(?:p|div|h[1-6]|blockquote|li|ul|ol|section|article|pre|details|summary|figure|figcaption|center)\b[^>]*>)|(<[^>]+>)")
-        .unwrap()
-});
+static RE_MD_HR_LIKE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^([-=]{3,})[ \t]*$").unwrap());
 static RE_SPACES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[ \t\r\f\v]+").unwrap());
 static RE_MULTI_NL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\n{3,}").unwrap());
-static RE_MD_HR_LIKE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^([*_=-]{3,})[ \t]*$").unwrap());
+
+const BLOCK_TAGS: &[&str] = &[
+    "p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "li", "ul", "ol", "section",
+    "article", "pre", "details", "summary", "figure", "figcaption", "center",
+];
+
+fn escape_md(s: &str) -> String {
+    let decoded = html_escape_decode(s);
+    if !decoded.contains(['\\', '*', '_', '~', '`', '&', '<', '>']) {
+        return decoded;
+    }
+    let mut out = String::with_capacity(decoded.len() + 8);
+    for ch in decoded.chars() {
+        match ch {
+            '\\' | '*' | '_' | '~' | '`' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn tag_name(e: &BytesStart) -> String {
+    String::from_utf8_lossy(e.name().as_ref()).to_lowercase()
+}
+
+fn passthrough_tag(e: &BytesStart) -> String {
+    let mut out = format!("<{}", tag_name(e));
+    for a in e.attributes().flatten() {
+        out.push(' ');
+        out.push_str(&String::from_utf8_lossy(a.key.as_ref()).to_lowercase());
+        out.push_str("=\"");
+        out.push_str(&String::from_utf8_lossy(&a.value));
+        out.push('"');
+    }
+    out.push('>');
+    out
+}
 
 #[derive(Clone)]
 struct SortKey {
@@ -76,34 +103,72 @@ struct Work {
 }
 
 fn clean_html_to_text(html: &str) -> String {
-    let text = html.replace("&lt;", "\u{2}").replace("&gt;", "\u{3}");
-    let text = html_escape_decode(&text);
-    let text = RE_A_TAG.replace_all(&text, |c: &regex::Captures| format!("[{}]({})", &c[2], &c[1]));
-    let text = RE_EM_TAG.replace_all(&text, "*");
-    let text = RE_STRONG_TAG.replace_all(&text, "**");
-    let text = RE_STRIKE_TAG.replace_all(&text, "~~");
-    let text = RE_CODE_TAG.replace_all(&text, "`");
-    let text = RE_Q_OPEN_TAG.replace_all(&text, "\"");
-    let text = RE_Q_CLOSE_TAG.replace_all(&text, "\"");
-    let text = RE_TAG_PASS.replace_all(&text, |c: &regex::Captures| -> String {
-        if c.get(1).is_some() {
-            "\n".into()
-        } else if c.get(2).is_some() {
-            format!("\n\n\u{1}\n\n")
-        } else if c.get(3).is_some() {
-            "\n\n".into()
-        } else if c.get(4).is_some() {
-            String::new()
-        } else if let Some(m) = c.get(5) {
-            m.as_str().to_lowercase()
-        } else {
-            String::new()
+    let mut reader = Reader::from_reader(html.as_bytes());
+    reader.config_mut().trim_text(false);
+    let mut out = String::with_capacity(html.len());
+    let mut buf = Vec::new();
+    let mut hrefs: Vec<String> = Vec::new();
+    loop {
+        let ev = match reader.read_event_into(&mut buf) {
+            Ok(ev) => ev,
+            Err(_) => {
+                let pos = (reader.buffer_position() as usize).min(html.len());
+                out.push_str(&escape_md(&html[pos..]));
+                break;
+            }
+        };
+        match ev {
+            Event::Start(e) => match tag_name(&e).as_str() {
+                "br" => out.push('\n'),
+                "hr" => out.push_str("\n\n---\n\n"),
+                "a" => {
+                    let href = e
+                        .attributes()
+                        .flatten()
+                        .find(|a| a.key.as_ref() == b"href")
+                        .map(|a| String::from_utf8_lossy(&a.value).into_owned())
+                        .unwrap_or_default();
+                    hrefs.push(href);
+                    out.push('[');
+                }
+                "em" | "i" => out.push('*'),
+                "strong" | "b" => out.push_str("**"),
+                "s" | "strike" | "del" => out.push_str("~~"),
+                "code" => out.push('`'),
+                "q" => out.push('"'),
+                name if BLOCK_TAGS.contains(&name) => {}
+                _ => out.push_str(&passthrough_tag(&e)),
+            },
+            Event::Empty(e) => match tag_name(&e).as_str() {
+                "br" => out.push('\n'),
+                "hr" => out.push_str("\n\n---\n\n"),
+                name if BLOCK_TAGS.contains(&name) => {}
+                _ => out.push_str(&passthrough_tag(&e)),
+            },
+            Event::End(e) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_lowercase();
+                match name.as_str() {
+                "a" => {
+                    let href = hrefs.pop().unwrap_or_default();
+                    out.push_str(&format!("]({href})"));
+                }
+                "em" | "i" => out.push('*'),
+                "strong" | "b" => out.push_str("**"),
+                "s" | "strike" | "del" => out.push_str("~~"),
+                "code" => out.push('`'),
+                "q" => out.push('"'),
+                name if BLOCK_TAGS.contains(&name) => out.push_str("\n\n"),
+                name => out.push_str(&format!("</{name}>")),
+                }
+            }
+            Event::Text(t) => out.push_str(&escape_md(&String::from_utf8_lossy(t.as_ref()))),
+            Event::Eof => break,
+            _ => {}
         }
-    });
-    let text = RE_SPACES.replace_all(&text, " ");
+        buf.clear();
+    }
+    let text = RE_SPACES.replace_all(&out, " ");
     let text = RE_MD_HR_LIKE.replace_all(&text, |c: &regex::Captures| format!("\\{}", &c[1]));
-    let text = text.replace('\u{1}', "---");
-    let text = text.replace('\u{2}', "&lt;").replace('\u{3}', "&gt;");
     let text = RE_MULTI_NL.replace_all(&text, "\n\n");
     text.trim().to_string()
 }
@@ -610,7 +675,7 @@ mod tests {
 
     #[test]
     fn double_escape_survives() {
-        assert_eq!(clean_html_to_text("<p>&amp;lt;div&amp;gt;</p>"), "&lt;div&gt;");
+        assert_eq!(clean_html_to_text("<p>&amp;lt;div&amp;gt;</p>"), "&amp;lt;div&amp;gt;");
     }
 
     #[test]
@@ -691,7 +756,7 @@ mod tests {
     fn passes_through_misc_tags() {
         assert_eq!(
             clean_html_to_text("<p>Hi <SPAN Class='x'>there</SPAN>.</p>"),
-            "Hi <span class='x'>there</span>."
+            "Hi <span class=\"x\">there</span>."
         );
     }
 
@@ -699,8 +764,25 @@ mod tests {
     fn escapes_author_hr_like_lines() {
         assert_eq!(
             clean_html_to_text("<p>Before</p>\n<p>***</p>\n<p>After</p>"),
-            "Before\n\n\\***\n\nAfter"
+            "Before\n\n\\*\\*\\*\n\nAfter"
         );
+        assert_eq!(
+            clean_html_to_text("<p>Before</p>\n<p>---</p>\n<p>After</p>"),
+            "Before\n\n\\---\n\nAfter"
+        );
+    }
+
+    #[test]
+    fn escapes_author_literal_asterisks() {
+        assert_eq!(
+            clean_html_to_text("<p>He *sighs* and _walks_ ~away~ with `code`.</p>"),
+            "He \\*sighs\\* and \\_walks\\_ \\~away\\~ with \\`code\\`."
+        );
+    }
+
+    #[test]
+    fn escapes_author_backslash() {
+        assert_eq!(clean_html_to_text("<p>a\\b</p>"), "a\\\\b");
     }
 
     #[test]
