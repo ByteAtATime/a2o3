@@ -62,7 +62,8 @@ struct Work {
 }
 
 fn clean_html_to_text(html: &str) -> String {
-    let text = RE_TAG_PASS.replace_all(html, |c: &regex::Captures| -> &'static str {
+    let text = html_escape_decode(html);
+    let text = RE_TAG_PASS.replace_all(&text, |c: &regex::Captures| -> &'static str {
         if c.get(1).is_some() {
             "\n"
         } else if c.get(2).is_some() {
@@ -73,7 +74,6 @@ fn clean_html_to_text(html: &str) -> String {
             ""
         }
     });
-    let text = html_escape_decode(&text);
     let text = RE_SPACES.replace_all(&text, " ");
     let text = RE_MULTI_NL.replace_all(&text, "\n\n");
     text.trim().to_string()
@@ -109,6 +109,13 @@ fn html_escape_decode(s: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+fn cut_mid_tag(tail: &str, end: usize) -> usize {
+    match tail[..end].rfind('<') {
+        Some(lt) if lt > tail[..end].rfind('>').unwrap_or(0) => lt,
+        _ => end,
+    }
 }
 
 fn work_id_from_name(name: &str) -> u64 {
@@ -212,7 +219,7 @@ fn extract_prose(epub: &[u8], work_id: u64) -> Option<Work> {
                 (None, Some(b)) => b,
                 (None, None) => tail.len(),
             };
-            &html[start..start + end]
+            &html[start..start + cut_mid_tag(tail, end)]
         }).unwrap_or(html);
         let body_text = clean_html_to_text(body_html);
 
@@ -547,4 +554,46 @@ fn main() {
         works_total as f64 / elapsed.max(1e-9),
         with_commas(compressed_bytes >> 20),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_escaped_markup() {
+        let html = r#"<div class="userstuff"><p>He typed &lt;div class="chapter"&gt; aloud.</p><p>End &amp; done.</p></div>"#;
+        let text = clean_html_to_text(html);
+        assert!(!text.contains('<'), "leftover markup in: {text:?}");
+        assert_eq!(text, "He typed aloud.\n\nEnd & done.");
+    }
+
+    #[test]
+    fn strips_real_markup() {
+        let html = "<h2 class=\"fff_chapter_title\">Ch 1</h2><div class=\"userstuff\"><p>A<br/>B</p></div>";
+        assert_eq!(clean_html_to_text(html), "Ch 1\n\nA\nB");
+    }
+
+    #[test]
+    fn double_escape_survives() {
+        assert_eq!(clean_html_to_text("<p>&amp;lt;div&amp;gt;</p>"), "<div>");
+    }
+
+    #[test]
+    fn cut_backs_up_to_unclosed_tag() {
+        let tail = r#"<p>Prose.</p>
+<div class="fff_chapter_notes">notes</div>"#;
+        let end = tail.find("fff_chapter_notes").unwrap();
+        assert_eq!(cut_mid_tag(tail, end), tail.rfind("<div").unwrap());
+        let text = clean_html_to_text(&tail[..cut_mid_tag(tail, end)]);
+        assert!(!text.contains('<'), "leftover markup in: {text:?}");
+        assert_eq!(text, "Prose.");
+    }
+
+    #[test]
+    fn cut_keeps_clean_boundary() {
+        let tail = "<p>Prose.</p><div>notes";
+        let end = tail.find("notes").unwrap();
+        assert_eq!(cut_mid_tag(tail, end), end);
+    }
 }
