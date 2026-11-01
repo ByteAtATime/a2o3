@@ -2,6 +2,8 @@
 import "../../styles/global.css";
 import DOMPurify from "isomorphic-dompurify";
 import { marked } from "marked";
+import RequiredTags from "../../components/RequiredTags.astro";
+import { cleanSummary, parseTag } from "../../lib/tags";
 import { findWork } from "../../server/clickhouse";
 import { readWorkText } from "../../server/shardReader";
 
@@ -15,24 +17,45 @@ const text = await readWorkText(workId);
 const proseHtml =
   text === undefined ? undefined : DOMPurify.sanitize(await marked.parse(text));
 
+const summary = work.summary ? cleanSummary(work.summary) : "";
+
 const number = new Intl.NumberFormat("en-US");
+const dateFormat = new Intl.DateTimeFormat("en-GB", {
+  day: "2-digit",
+  month: "short",
+  year: "numeric",
+  timeZone: "UTC",
+});
+const formatDate = (isoDate: string) =>
+  dateFormat.format(new Date(`${isoDate}T00:00:00Z`));
 
 const tagSections = [
-  { label: "Fandoms", values: work.fandoms },
-  { label: "Relationships", values: work.relationships },
-  { label: "Characters", values: work.characters },
-  { label: "Additional Tags", values: work.freeform_tags },
-  { label: "Collections", values: work.collections },
+  { label: "Fandoms", values: work.fandoms, linked: true },
+  { label: "Warnings", values: work.warnings, linked: true },
+  { label: "Relationships", values: work.relationships, linked: true },
+  { label: "Characters", values: work.characters, linked: true },
+  { label: "Additional Tags", values: work.freeform_tags, linked: true },
+  { label: "Collections", values: work.collections, linked: false },
 ].filter((section) => section.values.length > 0);
 
-const stats = [
-  { label: "Words", value: work.words },
-  { label: "Chapters", value: work.chapters_count },
-  { label: "Kudos", value: work.kudos },
-  { label: "Comments", value: work.comments },
-  { label: "Bookmarks", value: work.bookmarks },
-  { label: "Hits", value: work.hits },
-].filter((stat) => stat.value !== null);
+const details = [
+  { label: "Language", value: work.language },
+  { label: "Published", value: formatDate(work.published_date) },
+  {
+    label: "Updated",
+    value: formatDate(work.updated_date ?? work.published_date),
+  },
+  ...[
+    { label: "Words", value: work.words },
+    { label: "Chapters", value: work.chapters_count },
+    { label: "Kudos", value: work.kudos },
+    { label: "Comments", value: work.comments },
+    { label: "Bookmarks", value: work.bookmarks },
+    { label: "Hits", value: work.hits },
+  ].flatMap(({ label, value }) =>
+    value === null ? [] : [{ label, value: number.format(value) }],
+  ),
+];
 ---
 
 <!doctype html>
@@ -43,38 +66,85 @@ const stats = [
     <title>{work.title}</title>
   </head>
   <body>
-    <article>
-      <h1>{work.title}</h1>
-      <p>{work.authors.join(", ")}</p>
+    <main class="mx-auto max-w-3xl px-4 py-8 sm:py-12">
+      <article class="space-y-8">
+        <header class="flex items-center gap-4">
+          <RequiredTags
+            rating={work.rating}
+            warnings={work.warnings}
+            category={work.category}
+            isCompleted={work.is_completed}
+          />
+          <div class="min-w-0 space-y-1">
+            <h1 class="text-3xl font-semibold tracking-tight text-balance">
+              {work.title}
+            </h1>
+            <p class="text-lg text-muted-foreground">
+              {work.authors.join(", ")}
+            </p>
+          </div>
+        </header>
 
-      <dl>
-        <dt>Language</dt>
-        <dd>{work.language}</dd>
-        <dt>Published</dt>
-        <dd>{work.published_date}</dd>
-        <dt>Updated</dt>
-        <dd>{work.updated_date ?? work.published_date}</dd>
-        {stats.map((stat) => (
-          <>
-            <dt>{stat.label}</dt>
-            <dd>{stat.value === null ? "0" : number.format(stat.value)}</dd>
-          </>
-        ))}
-      </dl>
+        <section class="space-y-4 rounded-lg border bg-muted/40 p-4 text-sm">
+          {tagSections.length > 0 && (
+            <dl class="grid gap-x-4 gap-y-2 sm:grid-cols-[max-content_1fr]">
+              {tagSections.map((section) => (
+                <>
+                  <dt class="font-medium text-muted-foreground">
+                    {section.label}
+                  </dt>
+                  <dd>
+                    {section.values.map((value, index) => {
+                      const { label, href } = parseTag(value);
+                      return (
+                        <>
+                          {index > 0 && (
+                            <span class="text-muted-foreground">, </span>
+                          )}
+                          {section.linked ? (
+                            <a class="hover:underline" href={href}>
+                              {label}
+                            </a>
+                          ) : (
+                            label
+                          )}
+                        </>
+                      );
+                    })}
+                  </dd>
+                </>
+              ))}
+            </dl>
+          )}
 
-      {tagSections.map((section) => (
-        <section>
-          <h2>{section.label}</h2>
-          <ul>
-            {section.values.map((value) => (
-              <li>{value}</li>
+          <dl
+            class:list={[
+              "flex flex-wrap gap-x-6 gap-y-1",
+              tagSections.length > 0 && "border-t pt-4",
+            ]}
+          >
+            {details.map((detail) => (
+              <div class="flex gap-1.5">
+                <dt class="text-muted-foreground">{detail.label}</dt>
+                <dd class="font-medium tabular-nums">{detail.value}</dd>
+              </div>
             ))}
-          </ul>
+          </dl>
         </section>
-      ))}
 
-      {work.summary && <p>{work.summary}</p>}
-      {proseHtml && <div set:html={proseHtml} class="prose" />}
-    </article>
+        {summary && (
+          <blockquote class="border-l-4 border-[#900]/40 pl-4 whitespace-pre-line text-foreground/90">
+            {summary}
+          </blockquote>
+        )}
+
+        {proseHtml && (
+          <div
+            set:html={proseHtml}
+            class="prose prose-lg max-w-none border-t pt-8 prose-neutral"
+          />
+        )}
+      </article>
+    </main>
   </body>
 </html>
