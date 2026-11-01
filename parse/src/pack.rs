@@ -2,8 +2,8 @@ use rayon::prelude::*;
 use regex::Regex;
 use std::{
     env, fs,
-    io::{BufWriter, Read, Write},
-    path::{Path, PathBuf},
+    io::{BufWriter, Cursor, Read, Write},
+    path::Path,
     process,
     sync::{
         Arc, Condvar, LazyLock, Mutex,
@@ -54,7 +54,7 @@ struct SortKey {
     fandom: String,
     author: String,
     work_id: u64,
-    path: PathBuf,
+    name: String,
 }
 
 struct Work {
@@ -83,16 +83,15 @@ fn html_escape_decode(s: &str) -> String {
         .replace("&nbsp;", " ")
 }
 
-fn work_id_from_path(path: &Path) -> u64 {
-    path.to_str()
-        .and_then(|s| RE_FILENAME_ID.captures(s))
+fn work_id_from_name(name: &str) -> u64 {
+    RE_FILENAME_ID
+        .captures(name)
         .and_then(|m| m[1].parse().ok())
         .unwrap_or(0)
 }
 
-fn scan_metadata(path: &Path) -> Option<SortKey> {
-    let file = fs::File::open(path).ok()?;
-    let mut archive = ZipArchive::new(file).ok()?;
+fn scan_metadata(epub: &[u8], name: &str) -> Option<SortKey> {
+    let mut archive = ZipArchive::new(Cursor::new(epub)).ok()?;
     let namelist: Vec<String> = archive.file_names().map(String::from).collect();
 
     let mut lang = "en".to_string();
@@ -131,18 +130,17 @@ fn scan_metadata(path: &Path) -> Option<SortKey> {
     }
 
     if work_id == 0 {
-        work_id = work_id_from_path(path);
+        work_id = work_id_from_name(name);
     }
     if work_id == 0 {
         return None;
     }
 
-    Some(SortKey { lang, fandom, author, work_id, path: path.to_path_buf() })
+    Some(SortKey { lang, fandom, author, work_id, name: name.to_string() })
 }
 
-fn extract_prose(path: &Path, work_id: u64) -> Option<Work> {
-    let file = fs::File::open(path).ok()?;
-    let mut archive = ZipArchive::new(file).ok()?;
+fn extract_prose(epub: &[u8], work_id: u64) -> Option<Work> {
+    let mut archive = ZipArchive::new(Cursor::new(epub)).ok()?;
     let namelist: Vec<String> = archive.file_names().map(String::from).collect();
 
     let mut chapter_files: Vec<&String> =
@@ -261,40 +259,51 @@ impl FrameLimiter {
     }
 }
 
-fn collect_epubs(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_epubs(&path, out);
-        } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("epub")) {
-            out.push(path);
-        }
-    }
-}
-
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 3 {
-        eprintln!("Usage: {} <epub_dir> <output_dir>", args[0]);
+        eprintln!("Usage: {} <input.zip> <output_dir>", args[0]);
         process::exit(1);
     }
 
-    let input_dir = Path::new(&args[1]);
+    let file = fs::File::open(&args[1]).unwrap_or_else(|e| {
+        eprintln!("Failed to open {}: {e}", args[1]);
+        process::exit(1);
+    });
+    let bundle = Arc::new(Mutex::new(
+        ZipArchive::new(file).unwrap_or_else(|e| {
+            eprintln!("Failed to read zip {}: {e}", args[1]);
+            process::exit(1);
+        }),
+    ));
+    let epubs: Vec<String> = bundle
+        .lock()
+        .unwrap()
+        .file_names()
+        .filter(|n| n.to_lowercase().ends_with(".epub"))
+        .map(String::from)
+        .collect();
+
     let output_dir = Path::new(&args[2]);
     fs::create_dir_all(output_dir).expect("failed to create output dir");
 
     let start = Instant::now();
-    let mut epubs = Vec::new();
-    collect_epubs(input_dir, &mut epubs);
     println!("Found {} EPUBs in {:.1}s.", with_commas(epubs.len() as u64), start.elapsed().as_secs_f64());
+
+    let read_epub = |name: &str| -> Option<Vec<u8>> {
+        let mut archive = bundle.lock().unwrap();
+        archive.by_name(name).ok().and_then(|mut f| {
+            let mut buf = Vec::new();
+            f.read_to_end(&mut buf).ok().map(|_| buf)
+        })
+    };
 
     let scan_start = Instant::now();
     let scan_done = AtomicUsize::new(0);
     let mut keys: Vec<SortKey> = epubs
         .par_iter()
-        .filter_map(|p| {
-            let key = scan_metadata(p);
+        .filter_map(|name| {
+            let key = read_epub(name).and_then(|epub| scan_metadata(&epub, name));
             let d = scan_done.fetch_add(1, Ordering::Relaxed) + 1;
             if d % 100_000 == 0 {
                 let elapsed = scan_start.elapsed().as_secs_f64();
@@ -425,7 +434,8 @@ fn main() {
         let chunk_works: Vec<Work> = chunk
             .par_iter()
             .filter_map(|key| {
-                let work = extract_prose(&key.path, key.work_id)
+                let work = read_epub(&key.name)
+                    .and_then(|epub| extract_prose(&epub, key.work_id))
                     .filter(|w| !w.text.is_empty() && w.text.len() <= u32::MAX as usize);
                 let d = extracted.fetch_add(1, Ordering::Relaxed) + 1;
                 let bucket = d / REPORT_EVERY;

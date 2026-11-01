@@ -8,10 +8,6 @@ name = "parse"
 path = "src/parse.rs"
 
 [[bin]]
-name = "insert"
-path = "src/insert.rs"
-
-[[bin]]
 name = "pack"
 path = "src/pack.rs"
 

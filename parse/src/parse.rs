@@ -1,5 +1,10 @@
 use rayon::prelude::*;
-use std::{env, fs, io::Read as _, path::Path, process};
+use std::{
+    env,
+    fs,
+    io::{Cursor, Read, Seek, Write},
+    process,
+};
 
 use quick_xml::{events::Event, Reader};
 use regex::Regex;
@@ -7,7 +12,10 @@ use scraper::{Html, Selector};
 use serde::Serialize;
 use zip::ZipArchive;
 
-fn read_file_sirocco(archive: &mut ZipArchive<fs::File>, name: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+fn read_file_sirocco<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+    name: &str,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let idx = archive.index_for_name(name).ok_or_else(|| format!("File not found in archive: {name}"))?;
 
     let comp = archive.by_index(idx)?.compression();
@@ -122,7 +130,10 @@ fn to_int(val: &str) -> Option<u64> {
     (!clean.is_empty()).then(|| clean.parse().ok()).flatten()
 }
 
-fn read_zip_entry(archive: &mut ZipArchive<fs::File>, name: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+fn read_zip_entry<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+    name: &str,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut f = archive.by_name(name)?;
     let mut buf = Vec::new();
     f.read_to_end(&mut buf)?;
@@ -319,16 +330,19 @@ fn parse_title_page(html: &str, meta: &mut Metadata) {
                 let idx = RE_SERIES_IDX.captures(&clean).and_then(|c| {
                     c.get(1).or_else(|| c.get(2)).and_then(|m| m.as_str().parse().ok())
                 });
-                if !meta.series.iter().any(|s| s.name == s_name) {
+                if !s_name.is_empty() && !meta.series.iter().any(|s| s.name == s_name) {
                     meta.series.push(Series { name: s_name, index: idx, url: s_url });
                 }
             }
         } else if label_l.contains("collection") {
             for a_link in val_doc.select(&a_sel) {
-                meta.collections.push(Collection {
-                    name: a_link.text().collect::<String>().trim().to_string(),
-                    url: a_link.value().attr("href").map(String::from),
-                });
+                let name = a_link.text().collect::<String>().trim().to_string();
+                if !name.is_empty() {
+                    meta.collections.push(Collection {
+                        name,
+                        url: a_link.value().attr("href").map(String::from),
+                    });
+                }
             }
         } else if let Some(field) = ["kudos", "hits", "bookmarks", "comments"]
             .iter()
@@ -396,14 +410,8 @@ fn parse_chapter(html: &[u8]) -> ChapterInfo {
     info
 }
 
-fn parse_fff_ao3_epub(epub_path: &str) -> Result<Metadata, Box<dyn std::error::Error>> {
-    let path = Path::new(epub_path);
-    if !path.is_file() {
-        return Err(format!("File not found: {epub_path}").into());
-    }
-
-    let file = fs::File::open(path)?;
-    let mut archive = ZipArchive::new(file)?;
+fn parse_fff_ao3_epub(epub: &[u8]) -> Result<Metadata, Box<dyn std::error::Error>> {
+    let mut archive = ZipArchive::new(Cursor::new(epub))?;
     let namelist: Vec<String> = archive.file_names().map(String::from).collect();
 
     let mut meta = Metadata::default();
@@ -421,7 +429,7 @@ fn parse_fff_ao3_epub(epub_path: &str) -> Result<Metadata, Box<dyn std::error::E
         parse_title_page(&tp_html, &mut meta);
     }
 
-    if meta.status.as_deref() == Some("Completed") && meta.chapters_total.is_none() {
+    if meta.status.as_deref().is_some_and(|s| s.eq_ignore_ascii_case("Completed")) && meta.chapters_total.is_none() {
         meta.chapters_total = meta.chapters_count;
     }
 
@@ -444,43 +452,119 @@ fn parse_fff_ao3_epub(epub_path: &str) -> Result<Metadata, Box<dyn std::error::E
     Ok(meta)
 }
 
-fn collect_epubs(dir: &Path) -> Vec<std::path::PathBuf> {
-    let mut results = Vec::new();
-    if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                results.extend(collect_epubs(&path));
-            } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("epub")) {
-                results.push(path);
-            }
-        }
+fn parse_date(val: &Option<String>) -> String {
+    match val {
+        Some(s) if s.len() >= 10 && s.as_bytes()[4] == b'-' => s[..10].to_string(),
+        _ => "1970-01-01".to_string(),
     }
-    results
+}
+
+fn meta_to_row(meta: &Metadata) -> serde_json::Value {
+    let work_id: u64 = meta.story_id.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let authors: Vec<&str> = meta.authors.iter().map(|a| a.name.as_str()).collect();
+    let series_names: Vec<&str> = meta.series.iter().map(|s| s.name.as_str()).collect();
+    let series_indexes: Vec<u64> = meta.series.iter().map(|s| s.index.unwrap_or(0)).collect();
+    let collections: Vec<&str> = meta.collections.iter().map(|c| c.name.as_str()).collect();
+    let chapters_count = meta.chapters_count.unwrap_or(meta.chapters.len() as u64);
+    let is_completed = meta
+        .status
+        .as_deref()
+        .is_some_and(|s| s.eq_ignore_ascii_case("Completed") || s.eq_ignore_ascii_case("Complete"));
+
+    serde_json::json!({
+        "work_id": work_id,
+        "title": meta.title.as_deref().unwrap_or(""),
+        "authors": authors,
+        "rating": meta.rating.as_deref().unwrap_or("Not Rated"),
+        "warnings": meta.warnings,
+        "category": meta.category,
+        "language": meta.language.as_deref().unwrap_or("English"),
+        "is_completed": is_completed,
+        "fandoms": meta.fandoms,
+        "relationships": meta.relationships,
+        "characters": meta.characters,
+        "freeform_tags": meta.freeform_tags,
+        "words": meta.words,
+        "chapters_count": chapters_count,
+        "chapters_total": meta.chapters_total,
+        "published_date": parse_date(&meta.dates.published),
+        "updated_date": meta.dates.updated.as_deref().and_then(|u| {
+            (u.len() >= 10 && u.as_bytes()[4] == b'-').then(|| &u[..10])
+        }),
+        "kudos": meta.stats.kudos,
+        "comments": meta.stats.comments,
+        "bookmarks": meta.stats.bookmarks,
+        "hits": meta.stats.hits,
+        "series_names": series_names,
+        "series_indexes": series_indexes,
+        "collections": collections,
+        "summary": meta.summary,
+    })
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: {} <directory>", args[0]);
+        eprintln!("Usage: {} <input.zip>", args[0]);
         process::exit(1);
     }
 
-    let target = Path::new(&args[1]);
-    if !target.is_dir() {
-        eprintln!("Error: {} is not a directory", args[1]);
+    let file = fs::File::open(&args[1]).unwrap_or_else(|e| {
+        eprintln!("Failed to open {}: {e}", args[1]);
         process::exit(1);
-    }
+    });
+    let bundle = ZipArchive::new(file).unwrap_or_else(|e| {
+        eprintln!("Failed to read zip {}: {e}", args[1]);
+        process::exit(1);
+    });
 
-    let epubs = collect_epubs(target);
-    let results: Vec<_> = epubs
+    let epub_names: Vec<String> = bundle
+        .file_names()
+        .filter(|n| n.to_lowercase().ends_with(".epub"))
+        .map(String::from)
+        .collect();
+    eprintln!("Found {} EPUBs in {}", epub_names.len(), args[1]);
+
+    let bundle = std::sync::Arc::new(std::sync::Mutex::new(bundle));
+    let results: Vec<Metadata> = epub_names
         .par_iter()
-        .filter_map(|epub| {
-            parse_fff_ao3_epub(epub.to_str().unwrap_or(""))
-                .map_err(|e| eprintln!("Error processing {}: {e}", epub.display()))
+        .filter_map(|name| {
+            let epub = {
+                let mut archive = bundle.lock().unwrap();
+                archive.by_name(name).ok().and_then(|mut f| {
+                    let mut buf = Vec::new();
+                    f.read_to_end(&mut buf).ok().map(|_| buf)
+                })
+            }?;
+            parse_fff_ao3_epub(&epub)
+                .map_err(|e| eprintln!("Error processing {name}: {e}"))
                 .ok()
         })
         .collect();
 
-    println!("{}", serde_json::to_string_pretty(&results).expect("JSON serialization failed"));
+    let mut child = process::Command::new("chctl")
+        .args(["local", "client", "--query", "INSERT INTO works FORMAT JSONEachRow"])
+        .stdin(process::Stdio::piped())
+        .stdout(process::Stdio::null())
+        .stderr(process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| {
+            eprintln!("Failed to spawn chctl: {e}");
+            process::exit(1);
+        });
+
+    let stdin = child.stdin.as_mut().unwrap();
+    for meta in &results {
+        let row = meta_to_row(meta).to_string();
+        stdin.write_all(row.as_bytes()).unwrap();
+        stdin.write_all(b"\n").unwrap();
+    }
+
+    let output = child.wait_with_output().unwrap();
+    if !output.status.success() {
+        eprintln!("ClickHouse insert failed: {}", String::from_utf8_lossy(&output.stderr));
+        process::exit(1);
+    }
+
+    eprintln!("Inserted {} rows", results.len());
 }
