@@ -40,22 +40,33 @@ const workDetailSchema = z.object(workDetailFields);
 export type WorkSummary = z.infer<typeof workSummarySchema>;
 export type WorkDetail = z.infer<typeof workDetailSchema>;
 
-const workPageQuery = (where: string, order: string, limitOffset: string): string => `
+const workPageQuery = (ids: string, order: string): string => `
   WITH page AS (
-    SELECT * FROM works WHERE work_id IN (
-      SELECT work_id FROM works ${where} ${order} ${limitOffset}
-    )
+    SELECT * FROM works WHERE work_id IN (${ids})
   ),
   exploded AS (
-    SELECT work_id, 'fandoms' AS col, id FROM page ARRAY JOIN fandom_ids AS id
-    UNION ALL SELECT work_id, 'relationships', id FROM page ARRAY JOIN relationship_ids AS id
-    UNION ALL SELECT work_id, 'characters', id FROM page ARRAY JOIN character_ids AS id
-    UNION ALL SELECT work_id, 'freeform_tags', id FROM page ARRAY JOIN freeform_ids AS id
+    SELECT work_id, tupleElement(t, 1) AS col, tupleElement(t, 2) AS id
+    FROM page
+    ARRAY JOIN concat(
+      arrayMap(x -> ('fandoms', x), fandom_ids),
+      arrayMap(x -> ('relationships', x), relationship_ids),
+      arrayMap(x -> ('characters', x), character_ids),
+      arrayMap(x -> ('freeform_tags', x), freeform_ids)
+    ) AS t
   ),
   resolved AS (
     SELECT e.work_id, e.col, t.name
     FROM exploded e INNER JOIN ao3_tags t ON t.id = e.id
     WHERE t.id IN (SELECT id FROM exploded)
+  ),
+  tags AS (
+    SELECT
+      work_id,
+      groupArrayIf(name, col = 'fandoms') AS fandoms,
+      groupArrayIf(name, col = 'relationships') AS relationships,
+      groupArrayIf(name, col = 'characters') AS characters,
+      groupArrayIf(name, col = 'freeform_tags') AS freeform_tags
+    FROM resolved GROUP BY work_id
   )
   SELECT
     p.work_id AS work_id,
@@ -78,15 +89,12 @@ const workPageQuery = (where: string, order: string, limitOffset: string): strin
     p.series_names AS series_names,
     p.collections AS collections,
     p.summary AS summary,
-    ifNull(f.names, []) AS fandoms,
-    ifNull(r.names, []) AS relationships,
-    ifNull(c.names, []) AS characters,
-    ifNull(ff.names, []) AS freeform_tags
+    ifNull(g.fandoms, []) AS fandoms,
+    ifNull(g.relationships, []) AS relationships,
+    ifNull(g.characters, []) AS characters,
+    ifNull(g.freeform_tags, []) AS freeform_tags
   FROM page p
-  LEFT JOIN (SELECT work_id, groupArray(name) AS names FROM resolved WHERE col = 'fandoms' GROUP BY work_id) AS f ON f.work_id = p.work_id
-  LEFT JOIN (SELECT work_id, groupArray(name) AS names FROM resolved WHERE col = 'relationships' GROUP BY work_id) AS r ON r.work_id = p.work_id
-  LEFT JOIN (SELECT work_id, groupArray(name) AS names FROM resolved WHERE col = 'characters' GROUP BY work_id) AS c ON c.work_id = p.work_id
-  LEFT JOIN (SELECT work_id, groupArray(name) AS names FROM resolved WHERE col = 'freeform_tags' GROUP BY work_id) AS ff ON ff.work_id = p.work_id
+  LEFT JOIN tags g ON g.work_id = p.work_id
   ${order}
 `;
 
@@ -335,11 +343,16 @@ export const searchWorks = async (params: SearchParams): Promise<SearchResult> =
 
   const offset = ((params.page ?? 1) - 1) * pageSize;
 
-  const [rows, totals] = await Promise.all([
-    runQuery(workPageQuery(where, orderBy, `LIMIT ${pageSize} OFFSET ${offset}`), bindParams),
+  const [idRows, totals] = await Promise.all([
+    runQuery(`SELECT work_id FROM works ${where} ${orderBy} LIMIT ${pageSize} OFFSET ${offset}`, bindParams),
     runQuery(`SELECT count() AS total FROM works ${where}`, bindParams),
   ]);
   const total = z.object({ total: z.number().int() }).parse(totals[0]).total;
+  const ids = z.array(z.number().int()).parse(idRows.map((r) => (r as { work_id: number }).work_id));
+  if (ids.length === 0) {
+    return { works: [], total, page: params.page ?? 1, pageCount: Math.max(1, Math.ceil(total / pageSize)) };
+  }
+  const rows = await runQuery(workPageQuery(ids.join(", "), orderBy));
   return {
     works: rows.map((row) => workDetailSchema.parse(row)),
     total,
@@ -356,14 +369,15 @@ export const searchOptions = {
 } as const;
 
 export const listWorks = async (): Promise<WorkDetail[]> => {
-  const rows = await runQuery(workPageQuery("", "ORDER BY work_id DESC", `LIMIT ${listLimit}`));
+  const idRows = await runQuery(`SELECT work_id FROM works ORDER BY work_id DESC LIMIT ${listLimit}`);
+  const ids = z.array(z.number().int()).parse(idRows.map((r) => (r as { work_id: number }).work_id));
+  if (ids.length === 0) return [];
+  const rows = await runQuery(workPageQuery(ids.join(", "), "ORDER BY work_id DESC"));
   return rows.map((row) => workDetailSchema.parse(row));
 };
 
 export const findWork = async (workId: number): Promise<WorkDetail | undefined> => {
-  const rows = await runQuery(workPageQuery("WHERE work_id = {workId:UInt32}", "", "LIMIT 1"), {
-    workId: String(workId),
-  });
+  const rows = await runQuery(workPageQuery(String(workId), ""));
   const [row] = rows;
   if (row === undefined) return undefined;
   return workDetailSchema.parse(row);
