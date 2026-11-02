@@ -701,33 +701,28 @@ SELECT
     true AS canonical,
     0 AS merger_id
 FROM (
-    SELECT type, min(name) AS name
+    SELECT names.type AS type, min(names.name) AS name
     FROM tag_batch AS names
     LEFT JOIN (
-        SELECT DISTINCT lower(name) AS lname, type
+        SELECT lower(name) AS lname, type
         FROM ao3_tags
+        WHERE lower(name) IN (SELECT lname FROM tag_batch)
+        GROUP BY lname, type
     ) AS known ON known.lname = names.lname AND known.type = names.type
     WHERE known.lname = ''
-    GROUP BY type, names.lname
+    GROUP BY names.type, names.lname
 )
 "#;
 
 const RESOLVE_TAGS_SQL: &str = r#"
 SELECT
-    n.name AS name,
-    n.type AS type,
-    t.ids AS ids
-FROM tag_batch AS n
-LEFT JOIN (
-    SELECT
-        lower(tag.name) AS name,
-        tag.type AS type,
-        arraySlice(arraySort(groupUniqArray(target.id)), 1, 16) AS ids
-    FROM ao3_tags AS tag
-    INNER JOIN ao3_tags AS target ON target.id = if(tag.canonical, tag.id, tag.merger_id)
-    WHERE tag.canonical OR tag.merger_id != 0
-    GROUP BY name, type
-) AS t ON t.name = n.lname AND t.type = n.type
+    lower(tag.name) AS name,
+    tag.type AS type,
+    arraySlice(arraySort(groupUniqArray(if(tag.canonical, tag.id, tag.merger_id))), 1, 16) AS ids
+FROM ao3_tags AS tag
+WHERE (tag.canonical OR tag.merger_id != 0)
+  AND lower(tag.name) IN (SELECT lname FROM tag_batch)
+GROUP BY name, type
 FORMAT JSONEachRow
 "#;
 
