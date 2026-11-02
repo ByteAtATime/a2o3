@@ -44,10 +44,8 @@ CREATE TABLE IF NOT EXISTS works
 
     -- chapters
     chapter_names    Array(String) CODEC(ZSTD(19)),
-
-    -- notes
-    chapter_notes    Array(String) CODEC(ZSTD(19)),
-    end_notes        Nullable(String) CODEC(ZSTD(19)),
+    chapter_head_notes Array(String) CODEC(ZSTD(19)),
+    chapter_foot_notes Array(String) CODEC(ZSTD(19)),
 
     INDEX idx_language     language            TYPE set(100) GRANULARITY 1,
     INDEX idx_rating       rating              TYPE set(25) GRANULARITY 1,

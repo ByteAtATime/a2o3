@@ -53,6 +53,11 @@ static RE_CHAPTER_HEADING: std::sync::LazyLock<Regex> = std::sync::LazyLock::new
 });
 static RE_STRIP_TAGS: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new(r"<[^>]*>").unwrap());
+static RE_NOTES: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(r#"(?is)(?:<div class="fff_chapter_notes fff_(head|foot)_notes">(?P<notes>.*?)</div>)+\s*</body>"#).unwrap()
+});
+static RE_QUOTE: std::sync::LazyLock<Regex> =
+    std::sync::LazyLock::new(|| Regex::new(r"(?is)<blockquote[^>]*>(.*?)</blockquote>").unwrap());
 
 #[derive(Serialize, Default)]
 struct Author {
@@ -79,6 +84,10 @@ struct ChapterInfo {
     url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    head_notes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    foot_notes: Option<String>,
 }
 
 #[derive(Serialize, Default)]
@@ -390,6 +399,23 @@ fn parse_title_page(html: &str, meta: &mut Metadata) {
     }
 }
 
+fn parse_notes(html: &str) -> (Option<String>, Option<String>) {
+    let Some(caps) = RE_NOTES.captures(html) else {
+        return (None, None);
+    };
+    let text = RE_QUOTE
+        .find_iter(&caps["notes"])
+        .map(|m| {
+            let inner = RE_QUOTE.replace(m.as_str(), "$1");
+            RE_STRIP_TAGS.replace_all(&inner, " ").split_whitespace().collect::<Vec<_>>().join(" ")
+        })
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let foot = caps.get(1).is_some_and(|m| m.as_str() == "foot");
+    (foot.then(|| text.clone()), Some(text))
+}
+
 fn parse_chapter(html: &[u8]) -> ChapterInfo {
     let mut info = ChapterInfo::default();
     let mut reader = Reader::from_reader(html);
@@ -426,8 +452,10 @@ fn parse_chapter(html: &[u8]) -> ChapterInfo {
         buf.clear();
     }
 
+    let html_str = String::from_utf8_lossy(html);
+    (info.head_notes, info.foot_notes) = parse_notes(&html_str);
+
     if info.title.is_none() {
-        let html_str = String::from_utf8_lossy(html);
         if let Some(caps) = RE_CHAPTER_HEADING.captures(&html_str) {
             let raw = caps.get(1).or_else(|| caps.get(2)).map_or("", |m| m.as_str());
             let stripped = RE_STRIP_TAGS.replace_all(raw, "").trim().to_string();
@@ -499,6 +527,8 @@ fn meta_to_row(meta: &Metadata) -> serde_json::Value {
     let collections: Vec<&str> = meta.collections.iter().map(|c| c.name.as_str()).collect();
     let collection_ids: Vec<&str> = meta.collections.iter().filter_map(|c| c.id.as_deref()).collect();
     let chapter_names: Vec<&str> = meta.chapters.iter().filter_map(|c| c.title.as_deref()).collect();
+    let chapter_head_notes: Vec<&str> = meta.chapters.iter().filter_map(|c| c.head_notes.as_deref()).collect();
+    let chapter_foot_notes: Vec<&str> = meta.chapters.iter().filter_map(|c| c.foot_notes.as_deref()).collect();
     let chapters_count = meta.chapters_count.unwrap_or(meta.chapters.len() as u64);
     let is_completed = meta
         .status
@@ -535,6 +565,8 @@ fn meta_to_row(meta: &Metadata) -> serde_json::Value {
         "collection_ids": collection_ids,
         "summary": meta.summary,
         "chapter_names": chapter_names,
+        "chapter_head_notes": chapter_head_notes,
+        "chapter_foot_notes": chapter_foot_notes,
     })
 }
 
@@ -570,7 +602,9 @@ CREATE TABLE IF NOT EXISTS works_staging
     collections      Array(String),
     collection_ids   Array(String),
     summary          Nullable(String),
-    chapter_names    Array(String)
+    chapter_names    Array(String),
+    chapter_head_notes Array(String),
+    chapter_foot_notes Array(String)
 )
 ENGINE = MergeTree
 ORDER BY work_id
@@ -583,6 +617,8 @@ const ID_COLUMNS: &[(&str, &str)] = &[
     ("series_ids", "Array(UInt32) AFTER series_indexes"),
     ("collection_ids", "Array(String) AFTER collections"),
     ("chapter_names", "Array(String) AFTER summary"),
+    ("chapter_head_notes", "Array(String) AFTER chapter_names"),
+    ("chapter_foot_notes", "Array(String) AFTER chapter_head_notes"),
 ];
 
 fn recreate_staging(client: &ClickHouse) {
@@ -680,8 +716,8 @@ SELECT
     s.collection_ids,
     s.summary,
     s.chapter_names,
-    CAST([] AS Array(String)) AS chapter_notes,
-    CAST(NULL AS Nullable(String)) AS end_notes
+    s.chapter_head_notes,
+    s.chapter_foot_notes
 FROM works_staging AS s
 LEFT JOIN (
     SELECT
