@@ -43,6 +43,8 @@ static RE_TITLE_PAGE: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new(r"(?i).*title_page(_u\d+)?\.x?html$").unwrap());
 static RE_CHAPTER_FILE: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new(r"(?i).*/(file|chapter)\d+(_u\d+)?\.x?html$").unwrap());
+static RE_FILENAME_ID: std::sync::LazyLock<Regex> =
+    std::sync::LazyLock::new(|| Regex::new(r"(?i)[-_](\d+)\.epub$").unwrap());
 static RE_WORKS_ID: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new(r"/works/(\d+)").unwrap());
 static RE_CHAPTER_ID: std::sync::LazyLock<Regex> =
@@ -157,6 +159,10 @@ fn slug_from_url(re: &Regex, url: Option<&str>) -> Option<String> {
 
 fn series_id_from_url(url: Option<&str>) -> Option<u64> {
     id_from_url(&RE_SERIES_ID, url)
+}
+
+fn work_id_from_name(name: &str) -> Option<u64> {
+    id_from_url(&RE_FILENAME_ID, Some(name))
 }
 
 fn read_zip_entry<R: Read + Seek>(
@@ -586,7 +592,10 @@ fn parse_chapter(html: &[u8]) -> ChapterInfo {
     info
 }
 
-fn parse_fff_ao3_epub(epub: &[u8]) -> Result<Metadata, Box<dyn std::error::Error>> {
+fn parse_fff_ao3_epub(
+    epub: &[u8],
+    name: &str,
+) -> Result<Metadata, Box<dyn std::error::Error>> {
     let mut archive = ZipArchive::new(Cursor::new(epub))?;
     let namelist: Vec<String> = archive.file_names().map(String::from).collect();
 
@@ -620,6 +629,10 @@ fn parse_fff_ao3_epub(epub: &[u8]) -> Result<Metadata, Box<dyn std::error::Error
                 meta.story_id = Some(m[1].to_string());
             }
         }
+    }
+
+    if meta.story_id.is_none() {
+        meta.story_id = work_id_from_name(name).map(|id| id.to_string());
     }
 
     let mut chapter_files: Vec<_> = namelist
@@ -1224,7 +1237,7 @@ fn main() {
                 .zip(chunk)
                 .filter_map(|(epub, name)| {
                     let epub = epub.as_ref()?;
-                    parse_fff_ao3_epub(epub)
+                    parse_fff_ao3_epub(epub, name)
                         .map_err(|e| eprintln!("Error processing {name}: {e}"))
                         .ok()
                 })
