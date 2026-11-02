@@ -1,10 +1,13 @@
 use rayon::prelude::*;
 use std::{
+    collections::HashSet,
     env,
     fs,
     io::{Cursor, Read, Seek},
     process,
 };
+
+mod common;
 
 use quick_xml::{events::Event, Reader};
 use regex::Regex;
@@ -571,7 +574,6 @@ fn meta_to_row(meta: &Metadata) -> serde_json::Value {
 }
 
 const WORKS_PER_CHUNK: usize = 2048;
-const REPORT_EVERY: usize = 10_000;
 
 const CREATE_STAGING_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS works_staging
@@ -747,6 +749,8 @@ LEFT JOIN (
     ) AS t ON t.name = lower(names.name) AND t.type = names.type
     GROUP BY work_id
 ) AS tag_ids ON tag_ids.work_id = s.work_id
+LEFT JOIN (SELECT DISTINCT work_id FROM works) AS existing ON existing.work_id = s.work_id
+WHERE existing.work_id = 0
 "#;
 
 
@@ -852,29 +856,33 @@ fn run_sql_or_exit(client: &ClickHouse, sql: &str, what: &str) {
     }
 }
 
+fn load_work_ids(client: &ClickHouse) -> Vec<u32> {
+    let text = client.query("SELECT work_id FROM works").unwrap_or_else(|e| {
+        eprintln!("Reading work ids failed: {e}");
+        process::exit(1);
+    });
+    text.lines().filter_map(|line| line.trim().parse().ok()).collect()
+}
+
+fn meta_work_id(meta: &Metadata) -> Option<u32> {
+    meta.story_id
+        .as_deref()
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|&id| id != 0)
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: {} <input.zip>", args[0]);
+        eprintln!("Usage: {} <zip>... | --from-list <file>", args[0]);
         process::exit(1);
     }
 
-    let file = fs::File::open(&args[1]).unwrap_or_else(|e| {
-        eprintln!("Failed to open {}: {e}", args[1]);
+    let zips = common::collect_zips(&args[1..]);
+    if zips.is_empty() {
+        eprintln!("No input zips.");
         process::exit(1);
-    });
-    let mut bundle = ZipArchive::new(file).unwrap_or_else(|e| {
-        eprintln!("Failed to read zip {}: {e}", args[1]);
-        process::exit(1);
-    });
-
-    let epub_names: Vec<String> = bundle
-        .file_names()
-        .filter(|n| n.to_lowercase().ends_with(".epub"))
-        .map(String::from)
-        .collect();
-    let total = epub_names.len();
-    eprintln!("Found {} EPUBs in {}", total, args[1]);
+    }
 
     let client = ClickHouse::from_env();
     eprintln!("ClickHouse: {}", client.redacted_url());
@@ -888,7 +896,6 @@ fn main() {
     }
 
     run_sql_or_exit(&client, CREATE_STAGING_SQL, "Creating the staging table");
-    run_sql_or_exit(&client, TRUNCATE_STAGING_SQL, "Clearing the staging table");
     run_sql_or_exit(&client, "DROP TABLE IF EXISTS works_staging_new", "Dropping a leftover works_staging_new");
     match staging_has_id_columns(&client) {
         Ok(true) => {}
@@ -902,61 +909,120 @@ fn main() {
         }
     }
 
+    let mut seen = common::Seen::from_ids(load_work_ids(&client));
+    eprintln!(
+        "[parse] {} zips, {} works already in the database",
+        zips.len(),
+        seen.len()
+    );
+
     let start = std::time::Instant::now();
-    let mut inserted = 0usize;
-    let mut last_report = 0usize;
+    let mut total_inserted = 0usize;
+    let mut total_skipped = 0usize;
+    let mut total_rejected = 0usize;
 
-    for chunk in epub_names.chunks(WORKS_PER_CHUNK) {
-        let epubs: Vec<Option<Vec<u8>>> = chunk
-            .iter()
-            .map(|name| {
-                bundle.by_name(name).ok().and_then(|mut f| {
-                    let mut buf = Vec::new();
-                    f.read_to_end(&mut buf).ok().map(|_| buf)
+    for zip_path in &zips {
+        let zip_start = std::time::Instant::now();
+        let file = match fs::File::open(zip_path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("Failed to open {}: {e}", zip_path.display());
+                process::exit(1);
+            }
+        };
+        let mut bundle = match ZipArchive::new(file) {
+            Ok(archive) => archive,
+            Err(e) => {
+                eprintln!("Failed to read zip {}: {e}", zip_path.display());
+                process::exit(1);
+            }
+        };
+        let epub_names: Vec<String> = bundle
+            .file_names()
+            .filter(|n| n.to_lowercase().ends_with(".epub"))
+            .map(String::from)
+            .collect();
+
+        run_sql_or_exit(&client, TRUNCATE_STAGING_SQL, "Clearing the staging table");
+
+        let mut inserted = 0usize;
+        let mut skipped = 0usize;
+        let mut rejected = 0usize;
+        let mut new_ids: HashSet<u32> = HashSet::new();
+
+        for chunk in epub_names.chunks(WORKS_PER_CHUNK) {
+            let epubs: Vec<Option<Vec<u8>>> = chunk
+                .iter()
+                .map(|name| {
+                    bundle.by_name(name).ok().and_then(|mut f| {
+                        let mut buf = Vec::new();
+                        f.read_to_end(&mut buf).ok().map(|_| buf)
+                    })
                 })
-            })
-            .collect();
+                .collect();
 
-        let metas: Vec<Metadata> = epubs
-            .par_iter()
-            .zip(chunk)
-            .filter_map(|(epub, name)| {
-                let epub = epub.as_ref()?;
-                parse_fff_ao3_epub(epub)
-                    .map_err(|e| eprintln!("Error processing {name}: {e}"))
-                    .ok()
-            })
-            .collect();
+            let metas: Vec<Metadata> = epubs
+                .par_iter()
+                .zip(chunk)
+                .filter_map(|(epub, name)| {
+                    let epub = epub.as_ref()?;
+                    parse_fff_ao3_epub(epub)
+                        .map_err(|e| eprintln!("Error processing {name}: {e}"))
+                        .ok()
+                })
+                .collect();
+            rejected += chunk.len() - metas.len();
 
-        let mut body = Vec::new();
-        for meta in &metas {
-            body.extend_from_slice(meta_to_row(meta).to_string().as_bytes());
-            body.push(b'\n');
+            let mut body = Vec::new();
+            for meta in &metas {
+                let Some(id) = meta_work_id(meta) else {
+                    rejected += 1;
+                    continue;
+                };
+                if seen.contains(id) || !new_ids.insert(id) {
+                    skipped += 1;
+                    continue;
+                }
+                body.extend_from_slice(meta_to_row(meta).to_string().as_bytes());
+                body.push(b'\n');
+                inserted += 1;
+            }
+
+            if body.is_empty() {
+                continue;
+            }
+
+            if let Err(e) = client.insert("INSERT INTO works_staging FORMAT JSONEachRow", &body) {
+                eprintln!("ClickHouse insert failed: {e}");
+                process::exit(1);
+            }
         }
 
-        if let Err(e) = client.insert("INSERT INTO works_staging FORMAT JSONEachRow", &body) {
-            eprintln!("ClickHouse insert failed: {e}");
-            process::exit(1);
+        if inserted > 0 {
+            run_sql_or_exit(&client, INSERT_MISSING_TAGS_SQL, "Adding new tags");
+            run_sql_or_exit(&client, PROMOTE_SQL, "Promoting staged rows");
         }
+        seen.insert_all(new_ids.iter().copied());
 
-        inserted += metas.len();
-        if inserted / REPORT_EVERY > last_report / REPORT_EVERY {
-            last_report = inserted;
-            let elapsed = start.elapsed().as_secs_f64().max(1e-9);
-            eprintln!(
-                "[insert {}/{}] {:.0} works/sec | elapsed {:.1}m | ETA {:.1}m",
-                inserted,
-                total,
-                inserted as f64 / elapsed,
-                elapsed / 60.0,
-                (total - inserted) as f64 / (inserted as f64 / elapsed) / 60.0,
-            );
-        }
+        total_inserted += inserted;
+        total_skipped += skipped;
+        total_rejected += rejected;
+
+        eprintln!(
+            "[parse] {}: {} inserted, {} dup, {} rejected, {:.1}s",
+            zip_path.display(),
+            inserted,
+            skipped,
+            rejected,
+            zip_start.elapsed().as_secs_f64(),
+        );
     }
 
-    eprintln!("Staged {} rows in {:.1}m, adding new tags...", inserted, start.elapsed().as_secs_f64() / 60.0);
-    run_sql_or_exit(&client, INSERT_MISSING_TAGS_SQL, "Adding new tags");
-    eprintln!("Promoting...");
-    run_sql_or_exit(&client, PROMOTE_SQL, "Promoting staged rows");
-    eprintln!("Inserted {} rows in {:.1}m", inserted, start.elapsed().as_secs_f64() / 60.0);
+    eprintln!(
+        "[parse] done: {} inserted, {} dup, {} rejected in {:.1}m",
+        total_inserted,
+        total_skipped,
+        total_rejected,
+        start.elapsed().as_secs_f64() / 60.0,
+    );
 }

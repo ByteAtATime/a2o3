@@ -1,24 +1,26 @@
 use rayon::prelude::*;
 use regex::Regex;
 use std::{
+    collections::HashSet,
     env, fs,
     io::{BufWriter, Cursor, Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process,
     sync::{
         Arc, Condvar, LazyLock, Mutex,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicU64, Ordering},
         mpsc,
     },
     time::Instant,
 };
 use zip::ZipArchive;
 
+mod common;
+
 const WORKS_PER_CHUNK: usize = 8192;
 const FRAME_SIZE: usize = 16 << 20;
 const SHARD_TARGET_BYTES: usize = 2 << 30;
 const ZSTD_LEVEL: i32 = 11;
-const REPORT_EVERY: usize = 10_000;
 const MAX_INFLIGHT_FRAMES: usize = 64;
 
 static RE_LANG: LazyLock<Regex> =
@@ -261,6 +263,7 @@ struct ShardStats {
 }
 
 enum FrameMsg {
+    ShardStart { name: String },
     Frame {
         idx: Vec<(u32, u32, u32)>,
         d_size: u32,
@@ -297,100 +300,51 @@ impl FrameLimiter {
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 3 {
-        eprintln!("Usage: {} <input.zip> <output_dir>", args[0]);
+        eprintln!(
+            "Usage: {} <output_dir> <zip>... | <output_dir> --from-list <file>",
+            args[0]
+        );
         process::exit(1);
     }
 
-    let file = fs::File::open(&args[1]).unwrap_or_else(|e| {
-        eprintln!("Failed to open {}: {e}", args[1]);
+    let output_dir = PathBuf::from(&args[1]);
+    fs::create_dir_all(&output_dir).expect("failed to create output dir");
+
+    let zips = common::collect_zips(&args[2..]);
+    if zips.is_empty() {
+        eprintln!("No input zips.");
         process::exit(1);
-    });
-    let bundle = Arc::new(Mutex::new(
-        ZipArchive::new(file).unwrap_or_else(|e| {
-            eprintln!("Failed to read zip {}: {e}", args[1]);
-            process::exit(1);
-        }),
-    ));
-    let epubs: Vec<String> = bundle
-        .lock()
-        .unwrap()
-        .file_names()
-        .filter(|n| n.to_lowercase().ends_with(".epub"))
-        .map(String::from)
-        .collect();
+    }
 
-    let output_dir = Path::new(&args[2]);
-    fs::create_dir_all(output_dir).expect("failed to create output dir");
-
-    let start = Instant::now();
-    println!("Found {} EPUBs in {:.1}s.", with_commas(epubs.len() as u64), start.elapsed().as_secs_f64());
-
-    let read_epub = |name: &str| -> Option<Vec<u8>> {
-        let mut archive = bundle.lock().unwrap();
-        archive.by_name(name).ok().and_then(|mut f| {
-            let mut buf = Vec::new();
-            f.read_to_end(&mut buf).ok().map(|_| buf)
-        })
-    };
-
-    let scan_start = Instant::now();
-    let scan_done = AtomicUsize::new(0);
-    let mut keys: Vec<SortKey> = epubs
-        .par_iter()
-        .filter_map(|name| {
-            let key = read_epub(name).and_then(|epub| scan_metadata(&epub, name));
-            let d = scan_done.fetch_add(1, Ordering::Relaxed) + 1;
-            if d % 100_000 == 0 {
-                let elapsed = scan_start.elapsed().as_secs_f64();
-                eprintln!(
-                    "[scan {}/{}] {:.0} files/sec",
-                    with_commas(d as u64),
-                    with_commas(epubs.len() as u64),
-                    d as f64 / elapsed.max(1e-9),
-                );
-            }
-            key
-        })
-        .collect();
-    drop(epubs);
-    let scan_elapsed = scan_start.elapsed();
-    println!(
-        "[Pass 1/2] Scanned {} works in {:.1}s ({:.0} files/sec)",
-        with_commas(keys.len() as u64),
-        scan_elapsed.as_secs_f64(),
-        keys.len() as f64 / scan_elapsed.as_secs_f64().max(1e-9),
+    cleanup_orphans(&output_dir);
+    let mut seen = common::Seen::from_ids(load_packed_ids(&output_dir));
+    eprintln!(
+        "[pack] {} zips, {} works already packed",
+        with_commas(zips.len() as u64),
+        with_commas(seen.len() as u64)
     );
 
-    keys.sort_unstable_by(|a, b| {
-        a.lang.cmp(&b.lang)
-            .then_with(|| a.fandom.cmp(&b.fandom))
-            .then_with(|| a.author.cmp(&b.author))
-            .then_with(|| a.work_id.cmp(&b.work_id))
-    });
-
-    println!("[Pass 2/2] Extracting and packing");
-    let pack_start = Instant::now();
-    let total = keys.len();
-    let stats = Arc::new(ShardStats { start: pack_start, bytes_out: AtomicU64::new(0) });
-    let extracted = AtomicUsize::new(0);
-    let last_report = AtomicUsize::new(0);
-
+    let start = Instant::now();
+    let stats = Arc::new(ShardStats { start, bytes_out: AtomicU64::new(0) });
     let (frame_tx, frame_rx) = mpsc::channel::<FrameMsg>();
     let writer_stats = Arc::clone(&stats);
-    let writer_dir = output_dir.to_path_buf();
+    let writer_dir = output_dir.clone();
     let writer = std::thread::spawn(move || {
-        let mut shard_idx = 0usize;
         let mut zst: Option<BufWriter<fs::File>> = None;
         let mut seek_entries: Vec<(u32, u32)> = Vec::new();
         let mut idx_entries: Vec<(u32, u32, u32)> = Vec::new();
+        let mut shard_name: Option<String> = None;
         while let Ok(msg) = frame_rx.recv() {
             match msg {
+                FrameMsg::ShardStart { name } => shard_name = Some(name),
                 FrameMsg::Frame { idx, d_size, rx } => {
                     let compressed = rx.recv().expect("frame compressor died");
                     if zst.is_none() {
-                        let base = writer_dir.join(format!("ao3_text_{shard_idx:04}"));
-                        let f =
-                            fs::File::create(base.with_extension("seekable.zst")).expect("create zst");
+                        let name = shard_name.as_deref().expect("frame before shard start");
+                        let f = fs::File::create(
+                            writer_dir.join(name).with_extension("seekable.zst.tmp"),
+                        )
+                        .expect("create zst");
                         zst = Some(BufWriter::with_capacity(1 << 20, f));
                     }
                     zst.as_mut().unwrap().write_all(&compressed).expect("write frame");
@@ -398,15 +352,15 @@ fn main() {
                     idx_entries.extend(idx);
                 }
                 FrameMsg::ShardEnd { works } => {
-                    let base = writer_dir.join(format!("ao3_text_{shard_idx:04}"));
-                    {
-                        let mut f = zst.take().expect("shard end with no frames");
-                        write_seek_table(&mut f, &seek_entries);
-                        f.flush().expect("flush zst");
-                    }
+                    let name = shard_name.take().expect("shard end before shard start");
+                    let base = writer_dir.join(&name);
+                    let mut f = zst.take().expect("shard end with no frames");
+                    write_seek_table(&mut f, &seek_entries);
+                    f.flush().expect("flush zst");
+                    drop(f);
                     let mut idx_file = BufWriter::with_capacity(
                         1 << 20,
-                        fs::File::create(base.with_extension("idx")).expect("create idx"),
+                        fs::File::create(base.with_extension("idx.tmp")).expect("create idx"),
                     );
                     for &(work_id, off, len) in &idx_entries {
                         idx_file.write_all(&work_id.to_le_bytes()).unwrap();
@@ -414,11 +368,19 @@ fn main() {
                         idx_file.write_all(&len.to_le_bytes()).unwrap();
                     }
                     idx_file.flush().unwrap();
+                    drop(idx_file);
+                    fs::rename(
+                        base.with_extension("seekable.zst.tmp"),
+                        base.with_extension("seekable.zst"),
+                    )
+                    .expect("rename zst");
+                    fs::rename(base.with_extension("idx.tmp"), base.with_extension("idx"))
+                        .expect("rename idx");
 
                     let shard_compressed: u64 = seek_entries.iter().map(|&(c, _)| c as u64).sum();
                     writer_stats.bytes_out.fetch_add(shard_compressed, Ordering::Relaxed);
                     eprintln!(
-                        "[pack] shard {shard_idx:04} done: {} works, {} frames, {} MiB | {} MiB total | elapsed {:.1}m",
+                        "[pack] shard {name} done: {} works, {} frames, {} MiB | {} MiB total | elapsed {:.1}m",
                         with_commas(works as u64),
                         with_commas(seek_entries.len() as u64),
                         with_commas(shard_compressed >> 20),
@@ -427,21 +389,15 @@ fn main() {
                     );
                     seek_entries.clear();
                     idx_entries.clear();
-                    shard_idx += 1;
                 }
             }
         }
-        shard_idx
     });
 
     let limiter = FrameLimiter::new(MAX_INFLIGHT_FRAMES);
     let mut frame_works: Vec<Work> = Vec::new();
     let mut frame_idx: Vec<(u32, u32, u32)> = Vec::new();
     let mut frame_bytes = 0usize;
-    let mut shard_bytes = 0usize;
-    let mut shard_works = 0usize;
-    let mut shard_offset = 0u32;
-    let mut shard_count = 0usize;
 
     let send_frame = |frame_works: &mut Vec<Work>,
                           frame_idx: &mut Vec<(u32, u32, u32)>,
@@ -459,81 +415,294 @@ fn main() {
             let _ = ctx.send(compressed);
             lim.release();
         });
-        let _ = frame_tx
-            .send(FrameMsg::Frame { idx: std::mem::take(frame_idx), d_size, rx: crx });
+        let _ = frame_tx.send(FrameMsg::Frame { idx: std::mem::take(frame_idx), d_size, rx: crx });
         frame_works.clear();
         *frame_bytes = 0;
     };
 
-    for chunk in keys.chunks(WORKS_PER_CHUNK) {
-        let chunk_works: Vec<Work> = chunk
-            .par_iter()
-            .filter_map(|key| {
-                let work = read_epub(&key.name)
-                    .and_then(|epub| extract_prose(&epub, key.work_id))
-                    .filter(|w| !w.text.is_empty() && w.text.len() <= u32::MAX as usize);
-                let d = extracted.fetch_add(1, Ordering::Relaxed) + 1;
-                let bucket = d / REPORT_EVERY;
-                if bucket > 0 && last_report.fetch_max(bucket, Ordering::Relaxed) < bucket {
-                    let elapsed = pack_start.elapsed().as_secs_f64().max(1e-9);
-                    eprintln!(
-                        "[pack {}/{}] {:.0} works/sec | elapsed {:.1}m | ETA {:.1}m",
-                        with_commas(d as u64),
-                        with_commas(total as u64),
-                        d as f64 / elapsed,
-                        elapsed / 60.0,
-                        (total - d) as f64 / (d as f64 / elapsed) / 60.0,
-                    );
-                }
-                work
-            })
-            .collect();
+    let mut taken = existing_prefixes(&output_dir);
+    let mut skipped_out = BufWriter::new(
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(output_dir.join("skipped.txt"))
+            .expect("open skipped.txt"),
+    );
 
-        for work in chunk_works {
-            let len = work.text.len();
-            frame_idx.push((work.work_id as u32, shard_offset, len as u32));
-            shard_offset += len as u32;
-            frame_works.push(work);
-            frame_bytes += len;
-            shard_bytes += len;
-            shard_works += 1;
-            if frame_bytes >= FRAME_SIZE {
-                send_frame(&mut frame_works, &mut frame_idx, &mut frame_bytes);
+    let mut total_packed = 0u64;
+    let mut total_dups = 0u64;
+    let mut total_failed = 0u64;
+    let mut total_no_text = 0u64;
+    let mut total_shards = 0u64;
+
+    for zip_path in &zips {
+        let zip_start = Instant::now();
+        let file = match fs::File::open(zip_path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("Failed to open {}: {e}", zip_path.display());
+                process::exit(1);
             }
-            if shard_bytes >= SHARD_TARGET_BYTES {
-                if frame_bytes > 0 {
+        };
+        let bundle = Arc::new(Mutex::new(match ZipArchive::new(file) {
+            Ok(archive) => archive,
+            Err(e) => {
+                eprintln!("Failed to read zip {}: {e}", zip_path.display());
+                process::exit(1);
+            }
+        }));
+        let epubs: Vec<String> = bundle
+            .lock()
+            .unwrap()
+            .file_names()
+            .filter(|n| n.to_lowercase().ends_with(".epub"))
+            .map(String::from)
+            .collect();
+        let total = epubs.len();
+
+        let read_epub = |name: &str| -> Option<Vec<u8>> {
+            let mut archive = bundle.lock().unwrap();
+            archive.by_name(name).ok().and_then(|mut f| {
+                let mut buf = Vec::new();
+                f.read_to_end(&mut buf).ok().map(|_| buf)
+            })
+        };
+
+        let mut keys: Vec<SortKey> = epubs
+            .par_iter()
+            .filter_map(|name| read_epub(name).and_then(|epub| scan_metadata(&epub, name)))
+            .collect();
+        let scanned = keys.len();
+        let failed = total - scanned;
+
+        let mut new_ids: HashSet<u32> = HashSet::with_capacity(scanned);
+        keys.retain(|key| {
+            let id = key.work_id as u32;
+            !seen.contains(id) && new_ids.insert(id)
+        });
+        let dups = scanned - keys.len();
+        seen.insert_all(new_ids.iter().copied());
+
+        keys.sort_unstable_by(|a, b| {
+            a.lang
+                .cmp(&b.lang)
+                .then_with(|| a.fandom.cmp(&b.fandom))
+                .then_with(|| a.author.cmp(&b.author))
+                .then_with(|| a.work_id.cmp(&b.work_id))
+        });
+
+        let prefix = resolve_prefix(zip_path, &taken);
+        let mut shard_part = 0usize;
+        let mut shard_offset = 0u32;
+        let mut shard_bytes = 0usize;
+        let mut shard_works = 0usize;
+        let mut shard_started = false;
+        let mut shards_written = 0u64;
+        let mut packed = 0u64;
+        let mut no_text: Vec<u32> = Vec::new();
+
+        for chunk in keys.chunks(WORKS_PER_CHUNK) {
+            let chunk_works: Vec<(u64, Option<Work>)> = chunk
+                .par_iter()
+                .map(|key| {
+                    (
+                        key.work_id,
+                        read_epub(&key.name).and_then(|epub| extract_prose(&epub, key.work_id)),
+                    )
+                })
+                .collect();
+
+            for (work_id, work) in chunk_works {
+                let Some(work) =
+                    work.filter(|w| !w.text.is_empty() && w.text.len() <= u32::MAX as usize)
+                else {
+                    no_text.push(work_id as u32);
+                    continue;
+                };
+                if !shard_started {
+                    taken.insert(prefix.clone());
+                    let _ = frame_tx.send(FrameMsg::ShardStart {
+                        name: format!("{prefix}_{shard_part:02}"),
+                    });
+                    shard_started = true;
+                }
+                let len = work.text.len();
+                frame_idx.push((work.work_id as u32, shard_offset, len as u32));
+                shard_offset += len as u32;
+                frame_works.push(work);
+                frame_bytes += len;
+                shard_bytes += len;
+                shard_works += 1;
+                packed += 1;
+                if frame_bytes >= FRAME_SIZE {
                     send_frame(&mut frame_works, &mut frame_idx, &mut frame_bytes);
                 }
-                let _ = frame_tx.send(FrameMsg::ShardEnd { works: shard_works });
-                shard_bytes = 0;
-                shard_works = 0;
-                shard_offset = 0;
-                shard_count += 1;
+                if shard_bytes >= SHARD_TARGET_BYTES {
+                    if frame_bytes > 0 {
+                        send_frame(&mut frame_works, &mut frame_idx, &mut frame_bytes);
+                    }
+                    let _ = frame_tx.send(FrameMsg::ShardEnd { works: shard_works });
+                    shards_written += 1;
+                    shard_part += 1;
+                    shard_started = false;
+                    shard_bytes = 0;
+                    shard_works = 0;
+                    shard_offset = 0;
+                }
+            }
+        }
+        if frame_bytes > 0 {
+            send_frame(&mut frame_works, &mut frame_idx, &mut frame_bytes);
+        }
+        if shard_works > 0 {
+            let _ = frame_tx.send(FrameMsg::ShardEnd { works: shard_works });
+            shards_written += 1;
+        }
+        drop(keys);
+
+        for id in &no_text {
+            writeln!(skipped_out, "{id}").unwrap();
+        }
+        skipped_out.flush().unwrap();
+
+        total_packed += packed;
+        total_dups += dups as u64;
+        total_failed += failed as u64;
+        total_no_text += no_text.len() as u64;
+        total_shards += shards_written;
+
+        eprintln!(
+            "[pack] {}: {} packed, {} dup, {} failed, {} no-text, {} shards, {:.1}s",
+            zip_path.display(),
+            with_commas(packed),
+            with_commas(dups as u64),
+            with_commas(failed as u64),
+            with_commas(no_text.len() as u64),
+            shards_written,
+            zip_start.elapsed().as_secs_f64(),
+        );
+    }
+
+    drop(frame_tx);
+    let _ = writer.join();
+
+    let compressed_bytes = stats.bytes_out.load(Ordering::Relaxed);
+    let elapsed = start.elapsed().as_secs_f64();
+    println!(
+        "\nFinished! {} works in {} shards, {} dup, {} failed, {} no-text, {} MiB compressed, {:.1}m",
+        with_commas(total_packed),
+        with_commas(total_shards),
+        with_commas(total_dups),
+        with_commas(total_failed),
+        with_commas(total_no_text),
+        with_commas(compressed_bytes >> 20),
+        elapsed / 60.0,
+    );
+}
+
+const IDX_RECORD_SIZE: usize = 12;
+
+fn load_packed_ids(dir: &Path) -> Vec<u32> {
+    let mut ids = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return ids;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name.ends_with(".idx") {
+            if let Ok(data) = fs::read(&path) {
+                for record in data.chunks_exact(IDX_RECORD_SIZE) {
+                    ids.push(u32::from_le_bytes([record[0], record[1], record[2], record[3]]));
+                }
+            }
+        } else if name == "skipped.txt" {
+            if let Ok(text) = fs::read_to_string(&path) {
+                ids.extend(text.lines().filter_map(|line| line.trim().parse::<u32>().ok()));
             }
         }
     }
-    if frame_bytes > 0 {
-        send_frame(&mut frame_works, &mut frame_idx, &mut frame_bytes);
-    }
-    if shard_works > 0 {
-        let _ = frame_tx.send(FrameMsg::ShardEnd { works: shard_works });
-        shard_count += 1;
-    }
-    drop(frame_tx);
-    let _ = writer.join();
-    drop(keys);
+    ids
+}
 
-    let works_total = extracted.load(Ordering::Relaxed);
-    let compressed_bytes = stats.bytes_out.load(Ordering::Relaxed);
-    let elapsed = pack_start.elapsed().as_secs_f64();
-    println!(
-        "\nFinished! {} works in {} shards in {:.1}m ({:.0} works/sec), {} MiB compressed",
-        with_commas(works_total as u64),
-        shard_count,
-        elapsed / 60.0,
-        works_total as f64 / elapsed.max(1e-9),
-        with_commas(compressed_bytes >> 20),
-    );
+fn cleanup_orphans(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+    files.sort();
+
+    let mut indexed: HashSet<String> = HashSet::new();
+    for path in &files {
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            if let Some(stem) = name.strip_suffix(".idx") {
+                indexed.insert(stem.to_string());
+            }
+        }
+    }
+
+    for path in &files {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name.ends_with(".tmp") {
+            let _ = fs::remove_file(path);
+        } else if let Some(stem) = name.strip_suffix(".seekable.zst") {
+            if !indexed.contains(stem) {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+}
+
+fn prefix_of(stem: &str) -> &str {
+    match stem.rsplit_once('_') {
+        Some((base, part)) if part.len() == 2 && part.bytes().all(|b| b.is_ascii_digit()) => base,
+        _ => stem,
+    }
+}
+
+fn existing_prefixes(dir: &Path) -> HashSet<String> {
+    let mut prefixes = HashSet::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return prefixes;
+    };
+    for entry in entries.flatten() {
+        if let Ok(name) = entry.file_name().into_string() {
+            if let Some(stem) = name.strip_suffix(".idx") {
+                prefixes.insert(prefix_of(stem).to_string());
+            }
+        }
+    }
+    prefixes
+}
+
+fn resolve_prefix(zip: &Path, taken: &HashSet<String>) -> String {
+    let raw = zip.file_stem().and_then(|s| s.to_str()).unwrap_or("shard");
+    let stem: String = raw
+        .chars()
+        .take(40)
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let stem = if stem.is_empty() { "shard".to_string() } else { stem };
+    let candidate = format!("ao3_text_{stem}");
+    if !taken.contains(&candidate) {
+        return candidate;
+    }
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in zip.to_string_lossy().bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    format!("ao3_text_{stem}_{:06x}", hash & 0xff_ffff)
 }
 
 #[cfg(test)]
