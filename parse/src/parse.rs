@@ -58,7 +58,7 @@ static RE_CHAPTER_HEADING: std::sync::LazyLock<Regex> = std::sync::LazyLock::new
 static RE_STRIP_TAGS: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new(r"<[^>]*>").unwrap());
 static RE_NOTES: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-    Regex::new(r#"(?is)(?:<div class="fff_chapter_notes fff_(head|foot)_notes">(?P<notes>.*?)</div>)+\s*</body>"#).unwrap()
+    Regex::new(r#"(?is)<div class="fff_chapter_notes fff_(head|foot)_notes">(.*?)</div>"#).unwrap()
 });
 static RE_QUOTE: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new(r"(?is)<blockquote[^>]*>(.*?)</blockquote>").unwrap());
@@ -480,24 +480,29 @@ fn parse_title_page(html: &str, meta: &mut Metadata) {
 }
 
 fn parse_notes(html: &str) -> (Option<String>, Option<String>) {
-    let Some(caps) = RE_NOTES.captures(html) else {
-        return (None, None);
-    };
-    let text = RE_QUOTE
-        .find_iter(&caps["notes"])
-        .map(|m| {
-            let inner = RE_QUOTE.replace(m.as_str(), "$1");
-            RE_STRIP_TAGS
-                .replace_all(&inner, " ")
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .filter(|t| !t.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
-    let foot = caps.get(1).is_some_and(|m| m.as_str() == "foot");
-    (foot.then(|| text.clone()), Some(text))
+    let mut head = Vec::new();
+    let mut foot = Vec::new();
+    for caps in RE_NOTES.captures_iter(html) {
+        let text = RE_QUOTE
+            .find_iter(&caps[2])
+            .map(|m| {
+                let inner = RE_QUOTE.replace(m.as_str(), "$1");
+                RE_STRIP_TAGS
+                    .replace_all(&inner, " ")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let notes = if caps[1].eq_ignore_ascii_case("foot") { &mut foot } else { &mut head };
+        if !text.is_empty() {
+            notes.push(text);
+        }
+    }
+    let join = |v: Vec<String>| (!v.is_empty()).then(|| v.join("\n"));
+    (join(head), join(foot))
 }
 
 fn parse_chapter(html: &[u8]) -> ChapterInfo {
@@ -1331,5 +1336,54 @@ mod title_page_tests {
             r#"<html><body><table><tr><td><b>Characters:</b> Alice, Bob<br /></td></tr></table></body></html>"#,
         );
         assert_eq!(meta.characters, ["Alice", "Bob"]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_notes;
+
+    fn div(kind: &str, text: &str) -> String {
+        format!(r#"<div class="fff_chapter_notes fff_{kind}_notes"><blockquote>{text}</blockquote></div>"#)
+    }
+
+    #[test]
+    fn splits_head_and_foot_notes() {
+        let html = format!(
+            "<body>{}{}</body>",
+            div("head", "A head note."),
+            div("foot", "A foot note.")
+        );
+        let (head, foot) = parse_notes(&html);
+        assert_eq!(head.as_deref(), Some("A head note."));
+        assert_eq!(foot.as_deref(), Some("A foot note."));
+    }
+
+    #[test]
+    fn head_only_is_not_a_foot_note() {
+        let html = format!("<body>{}</body>", div("head", "Only a head note."));
+        let (head, foot) = parse_notes(&html);
+        assert_eq!(head.as_deref(), Some("Only a head note."));
+        assert_eq!(foot, None);
+    }
+
+    #[test]
+    fn foot_only_is_not_a_head_note() {
+        let html = format!("<body>{}</body>", div("foot", "Only a foot note."));
+        let (head, foot) = parse_notes(&html);
+        assert_eq!(head, None);
+        assert_eq!(foot.as_deref(), Some("Only a foot note."));
+    }
+
+    #[test]
+    fn joined_in_order_without_trailing_body() {
+        let html = format!("<p>text</p>{}{}", div("head", "H1"), div("head", "H2"));
+        let (head, _) = parse_notes(&html);
+        assert_eq!(head.as_deref(), Some("H1\nH2"));
+    }
+
+    #[test]
+    fn no_notes() {
+        assert_eq!(parse_notes("<body><p>hi</p></body>"), (None, None));
     }
 }
