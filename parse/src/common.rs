@@ -2,7 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 
 pub fn collect_zips(args: &[String]) -> Vec<PathBuf> {
-    let mut zips: Vec<PathBuf> = if args.len() == 2 && args[0] == "--from-list" {
+    if args.len() == 2 && args[0] == "--from-list" {
         let text = fs::read_to_string(&args[1]).unwrap_or_else(|e| {
             eprintln!("Failed to read {}: {e}", args[1]);
             std::process::exit(1);
@@ -14,9 +14,7 @@ pub fn collect_zips(args: &[String]) -> Vec<PathBuf> {
             .collect()
     } else {
         args.iter().map(PathBuf::from).collect()
-    };
-    zips.sort_by(|a, b| a.file_name().cmp(&b.file_name()).then_with(|| a.cmp(b)));
-    zips
+    }
 }
 
 pub struct Seen {
