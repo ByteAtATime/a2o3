@@ -1,0 +1,68 @@
+---
+import "../../styles/global.css";
+import { searchWorks } from "../../server/clickhouse";
+import { cleanSummary, formatTag, tagFromParam } from "../../lib/tags";
+import WorkBlurb from "../../components/WorkBlurb.astro";
+import Pagination from "../../components/Pagination.astro";
+
+const tag = tagFromParam(Astro.params.tag ?? "");
+const label = formatTag(tag);
+const page = Math.max(
+  1,
+  Number.parseInt(Astro.url.searchParams.get("page") ?? "1", 10) || 1,
+);
+
+const result = await searchWorks({
+  tag,
+  ratings: { include: [], exclude: [] },
+  warnings: { include: [], exclude: [] },
+  page,
+});
+
+if (result.total === 0) return new Response(null, { status: 404 });
+
+const number = new Intl.NumberFormat("en-US");
+const firstResult = (result.page - 1) * 20 + 1;
+const lastResult = Math.min(result.page * 20, result.total);
+
+const pageHref = (page: number): string => {
+  const sp = new URLSearchParams(Astro.url.searchParams);
+  sp.set("page", String(page));
+  return `${Astro.url.pathname}?${sp.toString()}`;
+};
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>{label}</title>
+  </head>
+  <body>
+    <main class="mx-auto max-w-3xl px-2 py-4 space-y-6">
+      <h1 class="text-xl font-semibold">{label}</h1>
+
+      <p class="text-sm text-slate-600">
+        {`${number.format(firstResult)} - ${number.format(lastResult)} of ${number.format(result.total)}`}
+      </p>
+
+      <ul>
+        {result.works.map((work, i) => (
+          <>
+            <WorkBlurb work={work} summary={cleanSummary(work.summary ?? "")} />
+            {i < result.works.length - 1 && (
+              <li class="border-b border-slate-300" aria-hidden="true"></li>
+            )}
+          </>
+        ))}
+      </ul>
+
+      <Pagination
+        page={result.page}
+        pageCount={result.pageCount}
+        href={pageHref}
+      />
+    </main>
+  </body>
+</html>

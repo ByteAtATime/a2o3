@@ -22,6 +22,11 @@ export const formatTag = (tag: string): string =>
 export const tagPath = (tag: string): string =>
   `/tags/${encodeURIComponent(tag)}`;
 
+export const tagFromParam = (param: string): string =>
+  param.replace(/%(2[346BCF]|3[ABDF]|40)/gi, (code) =>
+    decodeURIComponent(code),
+  );
+
 export const parseTag = (tag: string): { label: string; href: string } => ({
   label: formatTag(tag),
   href: tagPath(tag),

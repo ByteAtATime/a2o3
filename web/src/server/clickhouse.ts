@@ -242,6 +242,7 @@ export type SearchParams = {
   characters?: string;
   relationships?: string;
   freeforms?: string;
+  tag?: string;
   ratings: { include: string[]; exclude: string[] };
   warnings: { include: string[]; exclude: string[] };
   categories?: string[];
@@ -372,6 +373,17 @@ const buildWhere = (
     const names = splitList(raw ?? "");
     const cond = tagFilter(column, type, names);
     if (cond) conditions.push(cond);
+  }
+
+  if (params.tag) {
+    const name = b.bind(params.tag);
+    const named = `(SELECT groupArray(id) FROM ao3_tags WHERE name = ${name})`;
+    const ids = `(SELECT groupArray(id) FROM ao3_tags WHERE id IN ${named} OR merger_id IN ${named})`;
+    conditions.push(
+      `(${["fandom_ids", "relationship_ids", "character_ids", "freeform_ids"]
+        .map((column) => `hasAny(${column}, ${ids})`)
+        .join(" OR ")} OR has(warnings, ${name}))`,
+    );
   }
 
   if (params.ratings.include.length > 0) {

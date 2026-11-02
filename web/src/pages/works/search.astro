@@ -10,6 +10,7 @@ import {
 } from "../../server/clickhouse";
 import { cleanSummary } from "../../lib/tags";
 import WorkBlurb from "../../components/WorkBlurb.astro";
+import Pagination from "../../components/Pagination.astro";
 
 const params = parseSearchParams(Astro.url.searchParams);
 const result = await searchWorks(params);
@@ -336,29 +337,11 @@ const lastResult = Math.min(result.page * 20, result.total);
         ))}
       </ul>
 
-      {result.pageCount > 1 && (
-        <nav class="flex items-center gap-2 text-sm" aria-label="Pagination">
-          {result.page > 1 && (
-            <a
-              class="rounded border border-slate-300 px-2 py-1 hover:bg-slate-100"
-              href={pageHref(result.page - 1)}
-            >
-              Previous
-            </a>
-          )}
-          <span>
-            Page {result.page} of {number.format(result.pageCount)}
-          </span>
-          {result.page < result.pageCount && (
-            <a
-              class="rounded border border-slate-300 px-2 py-1 hover:bg-slate-100"
-              href={pageHref(result.page + 1)}
-            >
-              Next
-            </a>
-          )}
-        </nav>
-      )}
+      <Pagination
+        page={result.page}
+        pageCount={result.pageCount}
+        href={pageHref}
+      />
     </main>
   </body>
 </html>
