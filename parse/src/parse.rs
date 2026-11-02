@@ -649,19 +649,47 @@ impl ClickHouse {
         }
     }
 
+    fn redacted_url(&self) -> String {
+        match url::Url::parse(&self.url) {
+            Ok(mut endpoint) => {
+                if !endpoint.username().is_empty() || endpoint.password().is_some() {
+                    let _ = endpoint.set_username("");
+                    let _ = endpoint.set_password(None);
+                }
+                endpoint.to_string()
+            }
+            Err(_) => self.url.clone(),
+        }
+    }
+
     fn request(&self, query: &str) -> Result<ureq::RequestBuilder<ureq::typestate::WithBody>, String> {
         let mut endpoint = url::Url::parse(&self.url)
             .map_err(|e| format!("Invalid CH_URL {:?}: {e}", self.url))?;
+
+        let url_user = if endpoint.username().is_empty() {
+            None
+        } else {
+            Some(endpoint.username().to_string())
+        };
+        let url_password = endpoint.password().map(str::to_string);
+        let _ = endpoint.set_username("");
+        let _ = endpoint.set_password(None);
+
         endpoint.query_pairs_mut().append_pair("query", query);
         if let Some(database) = &self.database {
             endpoint.query_pairs_mut().append_pair("database", database);
         }
+
         let mut request = ureq::post(endpoint.as_str()).config().http_status_as_error(false).build();
-        if !self.user.is_empty() {
-            request = request.header("X-ClickHouse-User", &self.user);
-        }
-        if !self.password.is_empty() {
-            request = request.header("X-ClickHouse-Key", &self.password);
+
+        let (user, password) = match url_user {
+            Some(user) => (Some(user), url_password.unwrap_or_default()),
+            None => (Some(self.user.clone()), self.password.clone()),
+        };
+        if let Some(user) = user.filter(|u| !u.is_empty()) {
+            request = request
+                .header("X-ClickHouse-User", &user)
+                .header("X-ClickHouse-Key", &password);
         }
         Ok(request)
     }
@@ -723,7 +751,7 @@ fn main() {
     eprintln!("Found {} EPUBs in {}", total, args[1]);
 
     let client = ClickHouse::from_env();
-    eprintln!("ClickHouse: {}", client.url);
+    eprintln!("ClickHouse: {}", client.redacted_url());
 
     run_sql_or_exit(&client, CREATE_STAGING_SQL, "Creating the staging table");
     run_sql_or_exit(&client, TRUNCATE_STAGING_SQL, "Clearing the staging table");
