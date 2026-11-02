@@ -685,6 +685,7 @@ fn meta_to_row(meta: &Metadata, tags: &TagResolver) -> serde_json::Value {
 const WORKS_PER_CHUNK: usize = 2048;
 const WORKS_PER_BATCH: usize = 50_000;
 const MIN_WORKS_PER_INSERT: usize = 1024;
+const MAX_CACHED_TAGS: usize = 500_000;
 const REPORT_EVERY: usize = 10_000;
 
 const CREATE_TAG_BATCH_SQL: &str = "CREATE TEMPORARY TABLE IF NOT EXISTS tag_batch (name String, lname String, type String) ENGINE = Memory";
@@ -784,6 +785,16 @@ impl TagResolver {
             .map_or(&[], Vec::as_slice)
     }
 
+    fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    fn trim(&mut self) {
+        if self.ids.len() > MAX_CACHED_TAGS {
+            self.ids.clear();
+        }
+    }
+
     fn resolve(&mut self, client: &ClickHouse, tags: &[(String, TagType)]) -> Result<(), String> {
         client.execute_session(CREATE_TAG_BATCH_SQL)?;
         client.execute_session(TRUNCATE_TAG_BATCH_SQL)?;
@@ -863,18 +874,15 @@ fn write_batch(
     }
     let tags_done = started.elapsed().as_secs_f64();
 
-    let mut body = Vec::new();
-    for (_, meta) in batch {
-        body.extend_from_slice(meta_to_row(meta, resolver).to_string().as_bytes());
-        body.push(b'\n');
-    }
-    insert_works(client, &body)?;
+    insert_works(client, batch, resolver)?;
+    resolver.trim();
     eprintln!(
-        "[batch] {} works, {} new tags: tags {:.1}s, insert {:.1}s",
+        "[batch] {} works, {} new tags: tags {:.1}s, insert {:.1}s, {} tags cached",
         batch.len(),
         tags.len(),
         tags_done,
         started.elapsed().as_secs_f64() - tags_done,
+        resolver.len(),
     );
     Ok(())
 }
@@ -896,21 +904,24 @@ fn insert_batch(
     batch.clear();
 }
 
-fn insert_works(client: &ClickHouse, body: &[u8]) -> Result<(), String> {
-    let shards = std::thread::available_parallelism()
-        .map_or(4, |n| n.get())
-        .clamp(1, 8);
-    let rows: Vec<&[u8]> = body.split_inclusive(|byte| *byte == b'\n').collect();
-    let per_shard = rows.len().div_ceil(shards).max(MIN_WORKS_PER_INSERT);
-    let parts: Vec<&[&[u8]]> = rows.chunks(per_shard).collect();
-    parts
+fn insert_works(
+    client: &ClickHouse,
+    batch: &[(u32, Metadata)],
+    resolver: &TagResolver,
+) -> Result<(), String> {
+    let shards = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8);
+    let per_shard = batch.len().div_ceil(shards).max(MIN_WORKS_PER_INSERT);
+    batch
+        .chunks(per_shard)
+        .collect::<Vec<_>>()
         .par_iter()
         .map(|shard| {
-            let mut chunk = Vec::with_capacity(shard.iter().map(|row| row.len()).sum());
-            for row in shard.iter() {
-                chunk.extend_from_slice(row);
+            let mut body = Vec::new();
+            for (_, meta) in shard.iter() {
+                body.extend_from_slice(meta_to_row(meta, resolver).to_string().as_bytes());
+                body.push(b'\n');
             }
-            client.insert("INSERT INTO works FORMAT JSONEachRow", &chunk)
+            client.insert("INSERT INTO works FORMAT JSONEachRow", &body)
         })
         .collect::<Result<Vec<()>, String>>()
         .map(|_| ())
