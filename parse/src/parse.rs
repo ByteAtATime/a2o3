@@ -1,15 +1,14 @@
 use rayon::prelude::*;
 use std::{
-    collections::HashSet,
-    env,
-    fs,
+    collections::{HashMap, HashSet},
+    env, fs,
     io::{Cursor, Read, Seek},
     process,
 };
 
 mod common;
 
-use quick_xml::{events::Event, Reader};
+use quick_xml::{Reader, events::Event};
 use regex::Regex;
 use scraper::{Html, Selector};
 use serde::Serialize;
@@ -19,7 +18,9 @@ fn read_file_sirocco<R: Read + Seek>(
     archive: &mut ZipArchive<R>,
     name: &str,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let idx = archive.index_for_name(name).ok_or_else(|| format!("File not found in archive: {name}"))?;
+    let idx = archive
+        .index_for_name(name)
+        .ok_or_else(|| format!("File not found in archive: {name}"))?;
 
     let comp = archive.by_index(idx)?.compression();
     if matches!(comp, zip::CompressionMethod::Deflated) {
@@ -184,7 +185,11 @@ fn extract_opf_info(opf_xml: &[u8]) -> (Option<String>, Option<String>) {
                         let t = text.trim();
                         if !t.is_empty() {
                             let val = Some(t.to_string());
-                            if is_title { title = val; } else { source = val; }
+                            if is_title {
+                                title = val;
+                            } else {
+                                source = val;
+                            }
                         }
                     }
                 }
@@ -224,7 +229,11 @@ fn get_container_rootfile(container_xml: &[u8]) -> String {
 }
 
 fn parse_split_csv(text: &str) -> Vec<String> {
-    text.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect()
+    text.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect()
 }
 
 fn parse_title_page(html: &str, meta: &mut Metadata) {
@@ -241,11 +250,18 @@ fn parse_title_page(html: &str, meta: &mut Metadata) {
 
             if is_author {
                 if !name.is_empty() && !meta.authors.iter().any(|a| a.name == name) {
-                    meta.authors.push(Author { name, url: href.map(String::from) });
+                    meta.authors.push(Author {
+                        name,
+                        url: href.map(String::from),
+                    });
                 }
             } else {
-                if !name.is_empty() { meta.title = Some(name); }
-                if let Some(href) = href { meta.url = Some(href.to_string()); }
+                if !name.is_empty() {
+                    meta.title = Some(name);
+                }
+                if let Some(href) = href {
+                    meta.url = Some(href.to_string());
+                }
             }
         }
     }
@@ -261,12 +277,22 @@ fn parse_title_page(html: &str, meta: &mut Metadata) {
             let tds: Vec<_> = tr.select(&td_sel).collect();
             match tds.len() {
                 2 => {
-                    let label = tds[0].text().collect::<String>().trim().trim_end_matches(':').to_string();
+                    let label = tds[0]
+                        .text()
+                        .collect::<String>()
+                        .trim()
+                        .trim_end_matches(':')
+                        .to_string();
                     entries.push((label, tds[1].html()));
                 }
                 1 => {
                     if let Some(b) = tds[0].select(&b_sel).next() {
-                        let label = b.text().collect::<String>().trim().trim_end_matches(':').to_string();
+                        let label = b
+                            .text()
+                            .collect::<String>()
+                            .trim()
+                            .trim_end_matches(':')
+                            .to_string();
                         entries.push((label, tds[0].html()));
                     }
                 }
@@ -275,7 +301,12 @@ fn parse_title_page(html: &str, meta: &mut Metadata) {
         }
     } else {
         for b in doc.select(&b_sel) {
-            let label = b.text().collect::<String>().trim().trim_end_matches(':').to_string();
+            let label = b
+                .text()
+                .collect::<String>()
+                .trim()
+                .trim_end_matches(':')
+                .to_string();
             let mut val_parts = String::new();
             let mut curr = b.next_sibling();
 
@@ -304,7 +335,12 @@ fn parse_title_page(html: &str, meta: &mut Metadata) {
     for (label, val_html) in &entries {
         let label_l = label.to_lowercase();
         let val_doc = Html::parse_fragment(val_html);
-        let clean = val_doc.root_element().text().collect::<String>().trim().to_string();
+        let clean = val_doc
+            .root_element()
+            .text()
+            .collect::<String>()
+            .trim()
+            .to_string();
         let plain = !val_html.contains('<');
 
         if label_l.contains("category") || label_l.contains("fandom") {
@@ -316,7 +352,9 @@ fn parse_title_page(html: &str, meta: &mut Metadata) {
         } else if label_l.contains("genre") {
             for tag in parse_split_csv(&clean) {
                 if AO3_CATEGORIES.contains(&tag.as_str()) {
-                    if !meta.category.contains(&tag) { meta.category.push(tag); }
+                    if !meta.category.contains(&tag) {
+                        meta.category.push(tag);
+                    }
                 } else if !meta.freeform_tags.contains(&tag) {
                     meta.freeform_tags.push(tag);
                 }
@@ -356,12 +394,18 @@ fn parse_title_page(html: &str, meta: &mut Metadata) {
                 continue;
             }
             let idx = RE_SERIES_IDX.captures(&clean).and_then(|c| {
-                c.get(1).or_else(|| c.get(2)).and_then(|m| m.as_str().parse().ok())
+                c.get(1)
+                    .or_else(|| c.get(2))
+                    .and_then(|m| m.as_str().parse().ok())
             });
             let text_id = series_id_from_url(Some(clean.as_str()));
             let mut push = |s_name: &str, s_id: Option<u64>| {
                 if !s_name.is_empty() && !meta.series.iter().any(|s| s.name == s_name) {
-                    meta.series.push(Series { name: s_name.to_string(), index: idx, id: s_id });
+                    meta.series.push(Series {
+                        name: s_name.to_string(),
+                        index: idx,
+                        id: s_id,
+                    });
                 }
             };
             for a_link in val_doc.select(&a_sel) {
@@ -369,29 +413,35 @@ fn parse_title_page(html: &str, meta: &mut Metadata) {
                 push(&s_name, series_id_from_url(a_link.value().attr("href")));
             }
             if plain {
-                for s_name in clean.split(',').map(|s| RE_SERIES_IDX.replace(s, "").trim().to_string()) {
+                for s_name in clean
+                    .split(',')
+                    .map(|s| RE_SERIES_IDX.replace(s, "").trim().to_string())
+                {
                     push(&s_name, text_id);
                 }
             }
         } else if label_l.contains("collection") {
             let mut push = |c_name: &str, c_id: Option<String>| {
                 if !c_name.is_empty() && !meta.collections.iter().any(|c| c.name == c_name) {
-                    meta.collections.push(Collection { name: c_name.to_string(), id: c_id });
+                    meta.collections.push(Collection {
+                        name: c_name.to_string(),
+                        id: c_id,
+                    });
                 }
             };
             for a_link in val_doc.select(&a_sel) {
                 let name = a_link.text().collect::<String>().trim().to_string();
-                push(&name, slug_from_url(&RE_COLLECTION_ID, a_link.value().attr("href")));
+                push(
+                    &name,
+                    slug_from_url(&RE_COLLECTION_ID, a_link.value().attr("href")),
+                );
             }
             if plain {
                 for name in parse_split_csv(&clean) {
                     push(&name, None);
                 }
             }
-        } else if let Some(field) = ["kudos", "comments"]
-            .iter()
-            .find(|&&f| label_l == f)
-        {
+        } else if let Some(field) = ["kudos", "comments"].iter().find(|&&f| label_l == f) {
             let v = to_int(&clean);
             match *field {
                 "kudos" => meta.stats.kudos = v,
@@ -410,7 +460,11 @@ fn parse_notes(html: &str) -> (Option<String>, Option<String>) {
         .find_iter(&caps["notes"])
         .map(|m| {
             let inner = RE_QUOTE.replace(m.as_str(), "$1");
-            RE_STRIP_TAGS.replace_all(&inner, " ").split_whitespace().collect::<Vec<_>>().join(" ")
+            RE_STRIP_TAGS
+                .replace_all(&inner, " ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
         })
         .filter(|t| !t.is_empty())
         .collect::<Vec<_>>()
@@ -427,24 +481,44 @@ fn parse_chapter(html: &[u8]) -> ChapterInfo {
 
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref().eq_ignore_ascii_case(b"meta") => {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e))
+                if e.name().as_ref().eq_ignore_ascii_case(b"meta") =>
+            {
                 let attrs: std::collections::HashMap<String, String> = e
                     .attributes()
                     .flatten()
-                    .map(|a| (String::from_utf8_lossy(a.key.as_ref()).to_lowercase(), String::from_utf8_lossy(&a.value).into_owned()))
+                    .map(|a| {
+                        (
+                            String::from_utf8_lossy(a.key.as_ref()).to_lowercase(),
+                            String::from_utf8_lossy(&a.value).into_owned(),
+                        )
+                    })
                     .collect();
 
                 if let (Some(name), Some(content)) = (attrs.get("name"), attrs.get("content")) {
                     match name.as_str() {
                         "fff_chapter_data" => {
                             if let Ok(v) = serde_json::from_str::<serde_json::Value>(content) {
-                                info.title = v.get("title").or_else(|| v.get("chapter")).and_then(|x| x.as_str()).map(String::from).or(info.title);
-                                if info.url.is_none() { info.url = v.get("url").and_then(|x| x.as_str()).map(String::from); }
-                                if info.date.is_none() { info.date = v.get("date").and_then(|x| x.as_str()).map(String::from); }
+                                info.title = v
+                                    .get("title")
+                                    .or_else(|| v.get("chapter"))
+                                    .and_then(|x| x.as_str())
+                                    .map(String::from)
+                                    .or(info.title);
+                                if info.url.is_none() {
+                                    info.url =
+                                        v.get("url").and_then(|x| x.as_str()).map(String::from);
+                                }
+                                if info.date.is_none() {
+                                    info.date =
+                                        v.get("date").and_then(|x| x.as_str()).map(String::from);
+                                }
                             }
                         }
                         "chapterurl" if info.url.is_none() => info.url = Some(content.clone()),
-                        "chaptertitle" if info.title.is_none() => info.title = Some(content.clone()),
+                        "chaptertitle" if info.title.is_none() => {
+                            info.title = Some(content.clone())
+                        }
                         _ => {}
                     }
                 }
@@ -460,7 +534,10 @@ fn parse_chapter(html: &[u8]) -> ChapterInfo {
 
     if info.title.is_none() {
         if let Some(caps) = RE_CHAPTER_HEADING.captures(&html_str) {
-            let raw = caps.get(1).or_else(|| caps.get(2)).map_or("", |m| m.as_str());
+            let raw = caps
+                .get(1)
+                .or_else(|| caps.get(2))
+                .map_or("", |m| m.as_str());
             let stripped = RE_STRIP_TAGS.replace_all(raw, "").trim().to_string();
             if !stripped.is_empty() {
                 info.title = Some(stripped);
@@ -490,7 +567,12 @@ fn parse_fff_ao3_epub(epub: &[u8]) -> Result<Metadata, Box<dyn std::error::Error
         parse_title_page(&tp_html, &mut meta);
     }
 
-    if meta.status.as_deref().is_some_and(|s| s.eq_ignore_ascii_case("Completed")) && meta.chapters_total.is_none() {
+    if meta
+        .status
+        .as_deref()
+        .is_some_and(|s| s.eq_ignore_ascii_case("Completed"))
+        && meta.chapters_total.is_none()
+    {
         meta.chapters_total = meta.chapters_count;
     }
 
@@ -502,7 +584,10 @@ fn parse_fff_ao3_epub(epub: &[u8]) -> Result<Metadata, Box<dyn std::error::Error
         }
     }
 
-    let mut chapter_files: Vec<_> = namelist.iter().filter(|p| RE_CHAPTER_FILE.is_match(p)).collect();
+    let mut chapter_files: Vec<_> = namelist
+        .iter()
+        .filter(|p| RE_CHAPTER_FILE.is_match(p))
+        .collect();
     chapter_files.sort();
 
     for ch_path in chapter_files {
@@ -520,18 +605,42 @@ fn parse_date(val: &Option<String>) -> String {
     }
 }
 
-fn meta_to_row(meta: &Metadata) -> serde_json::Value {
-    let work_id: u64 = meta.story_id.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0);
+fn meta_to_row(meta: &Metadata, tags: &TagResolver) -> serde_json::Value {
+    let work_id: u64 = meta
+        .story_id
+        .as_deref()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     let authors: Vec<&str> = meta.authors.iter().map(|a| a.name.as_str()).collect();
     let series_names: Vec<&str> = meta.series.iter().map(|s| s.name.as_str()).collect();
     let series_indexes: Vec<u64> = meta.series.iter().map(|s| s.index.unwrap_or(0)).collect();
-    let author_urls: Vec<&str> = meta.authors.iter().filter_map(|a| a.url.as_deref()).collect();
+    let author_urls: Vec<&str> = meta
+        .authors
+        .iter()
+        .filter_map(|a| a.url.as_deref())
+        .collect();
     let series_ids: Vec<u64> = meta.series.iter().map(|s| s.id.unwrap_or(0)).collect();
     let collections: Vec<&str> = meta.collections.iter().map(|c| c.name.as_str()).collect();
-    let collection_ids: Vec<&str> = meta.collections.iter().filter_map(|c| c.id.as_deref()).collect();
-    let chapter_names: Vec<&str> = meta.chapters.iter().filter_map(|c| c.title.as_deref()).collect();
-    let chapter_head_notes: Vec<&str> = meta.chapters.iter().filter_map(|c| c.head_notes.as_deref()).collect();
-    let chapter_foot_notes: Vec<&str> = meta.chapters.iter().filter_map(|c| c.foot_notes.as_deref()).collect();
+    let collection_ids: Vec<&str> = meta
+        .collections
+        .iter()
+        .filter_map(|c| c.id.as_deref())
+        .collect();
+    let chapter_names: Vec<&str> = meta
+        .chapters
+        .iter()
+        .filter_map(|c| c.title.as_deref())
+        .collect();
+    let chapter_head_notes: Vec<&str> = meta
+        .chapters
+        .iter()
+        .filter_map(|c| c.head_notes.as_deref())
+        .collect();
+    let chapter_foot_notes: Vec<&str> = meta
+        .chapters
+        .iter()
+        .filter_map(|c| c.foot_notes.as_deref())
+        .collect();
     let chapters_count = meta.chapters_count.unwrap_or(meta.chapters.len() as u64);
     let is_completed = meta
         .status
@@ -548,10 +657,10 @@ fn meta_to_row(meta: &Metadata) -> serde_json::Value {
         "category": meta.category,
         "language": meta.language.as_deref().unwrap_or("English"),
         "is_completed": is_completed,
-        "fandoms": meta.fandoms,
-        "relationships": meta.relationships,
-        "characters": meta.characters,
-        "freeform_tags": meta.freeform_tags,
+        "fandom_ids": tag_ids(&meta.fandoms, TagType::Fandom, tags),
+        "relationship_ids": tag_ids(&meta.relationships, TagType::Relationship, tags),
+        "character_ids": tag_ids(&meta.characters, TagType::Character, tags),
+        "freeform_ids": tag_ids(&meta.freeform_tags, TagType::Freeform, tags),
         "words": meta.words,
         "chapters_count": chapters_count,
         "chapters_total": meta.chapters_total,
@@ -574,90 +683,12 @@ fn meta_to_row(meta: &Metadata) -> serde_json::Value {
 }
 
 const WORKS_PER_CHUNK: usize = 2048;
+const WORKS_PER_BATCH: usize = 50_000;
+const MIN_WORKS_PER_INSERT: usize = 1024;
 const REPORT_EVERY: usize = 10_000;
 
-const CREATE_STAGING_SQL: &str = r#"
-CREATE TABLE IF NOT EXISTS works_staging
-(
-    work_id          UInt32,
-    title            String,
-    authors          Array(String),
-    author_urls      Array(String),
-    rating           String,
-    warnings         Array(String),
-    category         Array(String),
-    language         String,
-    is_completed     Bool,
-    fandoms          Array(String),
-    relationships    Array(String),
-    characters       Array(String),
-    freeform_tags    Array(String),
-    words            Nullable(UInt32),
-    chapters_count   UInt16,
-    chapters_total   Nullable(UInt16),
-    published_date   Date,
-    updated_date     Nullable(Date),
-    kudos            Nullable(UInt32),
-    comments         Nullable(UInt32),
-    series_names     Array(String),
-    series_indexes   Array(UInt16),
-    series_ids       Array(UInt32),
-    collections      Array(String),
-    collection_ids   Array(String),
-    summary          Nullable(String),
-    chapter_names    Array(String),
-    chapter_head_notes Array(String),
-    chapter_foot_notes Array(String)
-)
-ENGINE = MergeTree
-ORDER BY work_id
-"#;
-
-const TRUNCATE_STAGING_SQL: &str = "TRUNCATE TABLE works_staging";
-
-const ID_COLUMNS: &[(&str, &str)] = &[
-    ("author_urls", "Array(String) AFTER authors"),
-    ("series_ids", "Array(UInt32) AFTER series_indexes"),
-    ("collection_ids", "Array(String) AFTER collections"),
-    ("chapter_names", "Array(String) AFTER summary"),
-    ("chapter_head_notes", "Array(String) AFTER chapter_names"),
-    ("chapter_foot_notes", "Array(String) AFTER chapter_head_notes"),
-];
-
-fn recreate_staging(client: &ClickHouse) {
-    let new_table = CREATE_STAGING_SQL.replace("works_staging", "works_staging_new");
-    run_sql_or_exit(client, &new_table, "Creating works_staging_new");
-
-    let columns = staging_columns(client).unwrap_or_else(|e| {
-        eprintln!("Reading the staging columns failed: {e}");
-        process::exit(1);
-    });
-    let id_names: Vec<&str> = ID_COLUMNS.iter().map(|(column, _)| *column).collect();
-    let (unnamed, named) = columns.split_at(columns.len().saturating_sub(id_names.len()));
-    let mut select = unnamed.to_vec();
-    if named == id_names.as_slice() {
-        select.extend(id_names.iter().map(|c| c.to_string()));
-    }
-
-    run_sql_or_exit(
-        client,
-        &format!("INSERT INTO works_staging_new ({}) SELECT {} FROM works_staging", select.join(", "), select.join(", ")),
-        "Copying staged rows",
-    );
-    run_sql_or_exit(client, "EXCHANGE TABLES works_staging AND works_staging_new", "Swapping staging tables");
-    run_sql_or_exit(client, "DROP TABLE works_staging_new", "Dropping the old staging table");
-}
-
-fn staging_columns(client: &ClickHouse) -> Result<Vec<String>, String> {
-    client.query(
-        "SELECT name FROM system.columns WHERE database = currentDatabase() AND table = 'works_staging' ORDER BY position",
-    ).map(|found| found.lines().map(str::to_string).collect())
-}
-
-fn staging_has_id_columns(client: &ClickHouse) -> Result<bool, String> {
-    let columns = staging_columns(client)?;
-    Ok(ID_COLUMNS.iter().all(|(column, _)| columns.iter().any(|c| c == column)))
-}
+const CREATE_TAG_BATCH_SQL: &str = "CREATE TEMPORARY TABLE IF NOT EXISTS tag_batch (name String, lname String, type String) ENGINE = Memory";
+const TRUNCATE_TAG_BATCH_SQL: &str = "TRUNCATE TABLE tag_batch";
 
 const INSERT_MISSING_TAGS_SQL: &str = r#"
 INSERT INTO ao3_tags
@@ -669,97 +700,228 @@ SELECT
     true AS canonical,
     0 AS merger_id
 FROM (
-    SELECT type, min(raw_name) AS name
-    FROM (
-        SELECT p.1 AS raw_name, p.2 AS type
-        FROM works_staging AS st
-        ARRAY JOIN arrayConcat(
-            arrayMap(x -> (x, 'Fandom'), st.fandoms),
-            arrayMap(x -> (x, 'Relationship'), st.relationships),
-            arrayMap(x -> (x, 'Character'), st.characters),
-            arrayMap(x -> (x, 'Freeform'), st.freeform_tags)
-        ) AS p
-    ) AS names
+    SELECT type, min(name) AS name
+    FROM tag_batch AS names
     LEFT JOIN (
-        SELECT DISTINCT lower(name) AS name, type
+        SELECT DISTINCT lower(name) AS lname, type
         FROM ao3_tags
-    ) AS known ON known.name = lower(names.raw_name) AND known.type = names.type
-    WHERE known.name = ''
-    GROUP BY type, lower(raw_name)
+    ) AS known ON known.lname = names.lname AND known.type = names.type
+    WHERE known.lname = ''
+    GROUP BY type, names.lname
 )
 "#;
 
-const PROMOTE_SQL: &str = r#"
-INSERT INTO works
+const RESOLVE_TAGS_SQL: &str = r#"
 SELECT
-    s.work_id,
-    s.title,
-    s.authors,
-    s.author_urls,
-    s.rating,
-    s.warnings,
-    s.category,
-    s.language,
-    s.is_completed,
-    tag_ids.fandom_ids,
-    tag_ids.relationship_ids,
-    tag_ids.character_ids,
-    tag_ids.freeform_ids,
-    s.words,
-    s.chapters_count,
-    s.chapters_total,
-    s.published_date,
-    s.updated_date,
-    s.kudos,
-    s.comments,
-    s.series_names,
-    s.series_indexes,
-    s.series_ids,
-    s.collections,
-    s.collection_ids,
-    s.summary,
-    s.chapter_names,
-    s.chapter_head_notes,
-    s.chapter_foot_notes
-FROM works_staging AS s
+    n.name AS name,
+    n.type AS type,
+    t.ids AS ids
+FROM tag_batch AS n
 LEFT JOIN (
     SELECT
-        work_id,
-        groupUniqArrayIf(t.id, t.type = 'Fandom' AND t.id != 0) AS fandom_ids,
-        groupUniqArrayIf(t.id, t.type = 'Relationship' AND t.id != 0) AS relationship_ids,
-        groupUniqArrayIf(t.id, t.type = 'Character' AND t.id != 0) AS character_ids,
-        groupUniqArrayIf(t.id, t.type = 'Freeform' AND t.id != 0) AS freeform_ids
-    FROM (
-        SELECT
-            st.work_id AS work_id,
-            tag_pair.1 AS name,
-            tag_pair.2 AS type
-        FROM works_staging AS st
-        ARRAY JOIN arrayConcat(
-            arrayMap(x -> (x, 'Fandom'), st.fandoms),
-            arrayMap(x -> (x, 'Relationship'), st.relationships),
-            arrayMap(x -> (x, 'Character'), st.characters),
-            arrayMap(x -> (x, 'Freeform'), st.freeform_tags)
-        ) AS tag_pair
-    ) AS names
-    LEFT JOIN (
-        SELECT lower(tag.name) AS name, tag.type AS type, target.id AS id
-        FROM ao3_tags AS tag
-        INNER JOIN ao3_tags AS target ON target.id = if(tag.canonical, tag.id, tag.merger_id)
-        WHERE tag.canonical OR tag.merger_id != 0
-    ) AS t ON t.name = lower(names.name) AND t.type = names.type
-    GROUP BY work_id
-) AS tag_ids ON tag_ids.work_id = s.work_id
-LEFT JOIN (SELECT DISTINCT work_id FROM works) AS existing ON existing.work_id = s.work_id
-WHERE existing.work_id = 0
+        lower(tag.name) AS name,
+        tag.type AS type,
+        arraySlice(arraySort(groupUniqArray(target.id)), 1, 16) AS ids
+    FROM ao3_tags AS tag
+    INNER JOIN ao3_tags AS target ON target.id = if(tag.canonical, tag.id, tag.merger_id)
+    WHERE tag.canonical OR tag.merger_id != 0
+    GROUP BY name, type
+) AS t ON t.name = n.lname AND t.type = n.type
+FORMAT JSONEachRow
 "#;
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum TagType {
+    Fandom,
+    Relationship,
+    Character,
+    Freeform,
+}
+
+impl TagType {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Fandom => "Fandom",
+            Self::Relationship => "Relationship",
+            Self::Character => "Character",
+            Self::Freeform => "Freeform",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "Fandom" => Some(Self::Fandom),
+            "Relationship" => Some(Self::Relationship),
+            "Character" => Some(Self::Character),
+            "Freeform" => Some(Self::Freeform),
+            _ => None,
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ResolvedTag {
+    name: String,
+    #[serde(rename = "type")]
+    tag_type: String,
+    ids: Vec<u32>,
+}
+
+#[derive(Default)]
+struct TagResolver {
+    ids: HashMap<(String, TagType), Vec<u32>>,
+}
+
+impl TagResolver {
+    fn contains(&self, name: &str, tag_type: TagType) -> bool {
+        self.ids
+            .contains_key(&(name.to_ascii_lowercase(), tag_type))
+    }
+
+    fn get(&self, name: &str, tag_type: TagType) -> &[u32] {
+        self.ids
+            .get(&(name.to_ascii_lowercase(), tag_type))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    fn resolve(&mut self, client: &ClickHouse, tags: &[(String, TagType)]) -> Result<(), String> {
+        client.execute_session(CREATE_TAG_BATCH_SQL)?;
+        client.execute_session(TRUNCATE_TAG_BATCH_SQL)?;
+
+        let mut body = Vec::new();
+        for (name, tag_type) in tags {
+            let row = serde_json::json!({
+                "name": name,
+                "lname": name.to_ascii_lowercase(),
+                "type": tag_type.as_str(),
+            });
+            body.extend_from_slice(row.to_string().as_bytes());
+            body.push(b'\n');
+        }
+        client.insert_session("INSERT INTO tag_batch FORMAT JSONEachRow", &body)?;
+        client.execute_session(INSERT_MISSING_TAGS_SQL)?;
+
+        let resolved = client.query_session(RESOLVE_TAGS_SQL)?;
+        for line in resolved.lines().filter(|line| !line.is_empty()) {
+            let tag: ResolvedTag = serde_json::from_str(line)
+                .map_err(|e| format!("Unexpected tag id row {line:?}: {e}"))?;
+            if let Some(tag_type) = TagType::from_str(&tag.tag_type) {
+                self.ids
+                    .insert((tag.name.to_ascii_lowercase(), tag_type), tag.ids);
+            }
+        }
+        for (name, tag_type) in tags {
+            self.ids
+                .entry((name.to_ascii_lowercase(), *tag_type))
+                .or_default();
+        }
+        Ok(())
+    }
+}
+
+fn work_tags(meta: &Metadata) -> [(TagType, &Vec<String>); 4] {
+    [
+        (TagType::Fandom, &meta.fandoms),
+        (TagType::Relationship, &meta.relationships),
+        (TagType::Character, &meta.characters),
+        (TagType::Freeform, &meta.freeform_tags),
+    ]
+}
+
+fn tag_ids(names: &[String], tag_type: TagType, resolver: &TagResolver) -> Vec<u32> {
+    let mut ids: Vec<u32> = names
+        .iter()
+        .flat_map(|name| resolver.get(name, tag_type))
+        .copied()
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+fn write_batch(
+    client: &ClickHouse,
+    resolver: &mut TagResolver,
+    batch: &[(u32, Metadata)],
+) -> Result<(), String> {
+    let started = std::time::Instant::now();
+    let mut tags: Vec<(String, TagType)> = Vec::new();
+    let mut queued: HashSet<(String, TagType)> = HashSet::new();
+    for (_, meta) in batch {
+        for (tag_type, names) in work_tags(meta) {
+            for name in names {
+                if !resolver.contains(name, tag_type)
+                    && queued.insert((name.to_ascii_lowercase(), tag_type))
+                {
+                    tags.push((name.clone(), tag_type));
+                }
+            }
+        }
+    }
+    if !tags.is_empty() {
+        resolver.resolve(client, &tags)?;
+    }
+    let tags_done = started.elapsed().as_secs_f64();
+
+    let mut body = Vec::new();
+    for (_, meta) in batch {
+        body.extend_from_slice(meta_to_row(meta, resolver).to_string().as_bytes());
+        body.push(b'\n');
+    }
+    insert_works(client, &body)?;
+    eprintln!(
+        "[batch] {} works, {} new tags: tags {:.1}s, insert {:.1}s",
+        batch.len(),
+        tags.len(),
+        tags_done,
+        started.elapsed().as_secs_f64() - tags_done,
+    );
+    Ok(())
+}
+
+fn insert_batch(
+    client: &ClickHouse,
+    resolver: &mut TagResolver,
+    batch: &mut Vec<(u32, Metadata)>,
+    seen: &mut common::Seen,
+) {
+    if batch.is_empty() {
+        return;
+    }
+    if let Err(e) = write_batch(client, resolver, batch) {
+        eprintln!("Writing {} works failed: {e}", batch.len());
+        process::exit(1);
+    }
+    seen.insert_all(batch.iter().map(|(id, _)| *id));
+    batch.clear();
+}
+
+fn insert_works(client: &ClickHouse, body: &[u8]) -> Result<(), String> {
+    let shards = std::thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .clamp(1, 8);
+    let rows: Vec<&[u8]> = body.split_inclusive(|byte| *byte == b'\n').collect();
+    let per_shard = rows.len().div_ceil(shards).max(MIN_WORKS_PER_INSERT);
+    let parts: Vec<&[&[u8]]> = rows.chunks(per_shard).collect();
+    parts
+        .par_iter()
+        .map(|shard| {
+            let mut chunk = Vec::with_capacity(shard.iter().map(|row| row.len()).sum());
+            for row in shard.iter() {
+                chunk.extend_from_slice(row);
+            }
+            client.insert("INSERT INTO works FORMAT JSONEachRow", &chunk)
+        })
+        .collect::<Result<Vec<()>, String>>()
+        .map(|_| ())
+}
 
 struct ClickHouse {
     url: String,
     user: String,
     password: String,
     database: Option<String>,
+    session: String,
 }
 
 impl ClickHouse {
@@ -769,6 +931,14 @@ impl ClickHouse {
             user: env::var("CH_USER").unwrap_or_else(|_| "default".into()),
             password: env::var("CH_PASSWORD").unwrap_or_default(),
             database: env::var("CH_DATABASE").ok(),
+            session: format!(
+                "parse-{}-{}",
+                process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ),
         }
     }
 
@@ -785,7 +955,11 @@ impl ClickHouse {
         }
     }
 
-    fn request(&self, query: &str) -> Result<ureq::RequestBuilder<ureq::typestate::WithBody>, String> {
+    fn request(
+        &self,
+        query: &str,
+        session: bool,
+    ) -> Result<ureq::RequestBuilder<ureq::typestate::WithBody>, String> {
         let mut endpoint = url::Url::parse(&self.url)
             .map_err(|e| format!("Invalid CH_URL {:?}: {e}", self.url))?;
 
@@ -799,11 +973,19 @@ impl ClickHouse {
         let _ = endpoint.set_password(None);
 
         endpoint.query_pairs_mut().append_pair("query", query);
+        if session {
+            endpoint
+                .query_pairs_mut()
+                .append_pair("session_id", &self.session);
+        }
         if let Some(database) = &self.database {
             endpoint.query_pairs_mut().append_pair("database", database);
         }
 
-        let mut request = ureq::post(endpoint.as_str()).config().http_status_as_error(false).build();
+        let mut request = ureq::post(endpoint.as_str())
+            .config()
+            .http_status_as_error(false)
+            .build();
 
         let (user, password) = match url_user {
             Some(user) => (Some(user), url_password.unwrap_or_default()),
@@ -817,7 +999,10 @@ impl ClickHouse {
         Ok(request)
     }
 
-    fn check(&self, response: Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> Result<(), String> {
+    fn check(
+        &self,
+        response: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+    ) -> Result<(), String> {
         let response = response.map_err(|e| format!("Could not reach {}: {e}", self.url))?;
         if response.status().is_success() {
             return Ok(());
@@ -833,36 +1018,51 @@ impl ClickHouse {
         }
     }
 
-    fn execute(&self, sql: &str) -> Result<(), String> {
-        self.check(self.request(sql)?.send(&[]))
+    fn execute_session(&self, sql: &str) -> Result<(), String> {
+        self.check(self.request(sql, true)?.send(&[]))
     }
 
     fn query(&self, sql: &str) -> Result<String, String> {
-        let response = self.request(sql)?.send(&[]).map_err(|e| format!("Could not reach {}: {e}", self.url))?;
+        self.query_mode(sql, false)
+    }
+
+    fn query_session(&self, sql: &str) -> Result<String, String> {
+        self.query_mode(sql, true)
+    }
+
+    fn query_mode(&self, sql: &str, session: bool) -> Result<String, String> {
+        let response = self
+            .request(sql, session)?
+            .send(&[])
+            .map_err(|e| format!("Could not reach {}: {e}", self.url))?;
         if !response.status().is_success() {
             return self.check(Ok(response)).map(|()| String::new());
         }
-        response.into_body().read_to_string().map_err(|e| format!("Could not read the response: {e}"))
+        response
+            .into_body()
+            .read_to_string()
+            .map_err(|e| format!("Could not read the response: {e}"))
     }
 
     fn insert(&self, sql: &str, body: &[u8]) -> Result<(), String> {
-        self.check(self.request(sql)?.send(body))
+        self.check(self.request(sql, false)?.send(body))
     }
-}
 
-fn run_sql_or_exit(client: &ClickHouse, sql: &str, what: &str) {
-    if let Err(e) = client.execute(sql) {
-        eprintln!("{what} failed: {e}");
-        process::exit(1);
+    fn insert_session(&self, sql: &str, body: &[u8]) -> Result<(), String> {
+        self.check(self.request(sql, true)?.send(body))
     }
 }
 
 fn load_work_ids(client: &ClickHouse) -> Vec<u32> {
-    let text = client.query("SELECT work_id FROM works").unwrap_or_else(|e| {
-        eprintln!("Reading work ids failed: {e}");
-        process::exit(1);
-    });
-    text.lines().filter_map(|line| line.trim().parse().ok()).collect()
+    let text = client
+        .query("SELECT work_id FROM works")
+        .unwrap_or_else(|e| {
+            eprintln!("Reading work ids failed: {e}");
+            process::exit(1);
+        });
+    text.lines()
+        .filter_map(|line| line.trim().parse().ok())
+        .collect()
 }
 
 fn meta_work_id(meta: &Metadata) -> Option<u32> {
@@ -902,28 +1102,7 @@ fn main() {
     let client = ClickHouse::from_env();
     eprintln!("ClickHouse: {}", client.redacted_url());
 
-    for (column, definition) in ID_COLUMNS {
-        client.execute(&format!("ALTER TABLE works ADD COLUMN IF NOT EXISTS {column} {definition}"))
-            .unwrap_or_else(|e| {
-                eprintln!("Verifying the works table failed: {e}");
-                process::exit(1);
-            });
-    }
-
-    run_sql_or_exit(&client, CREATE_STAGING_SQL, "Creating the staging table");
-    run_sql_or_exit(&client, "DROP TABLE IF EXISTS works_staging_new", "Dropping a leftover works_staging_new");
-    match staging_has_id_columns(&client) {
-        Ok(true) => {}
-        Ok(false) => {
-            eprintln!("Rebuilding works_staging with the id columns...");
-            recreate_staging(&client);
-        }
-        Err(e) => {
-            eprintln!("Checking the staging table failed: {e}");
-            process::exit(1);
-        }
-    }
-
+    let mut resolver = TagResolver::default();
     let mut seen = common::Seen::from_ids(load_work_ids(&client));
     eprintln!(
         "[parse] {} zips, {} works already in the database",
@@ -960,12 +1139,11 @@ fn main() {
             .map(String::from)
             .collect();
 
-        run_sql_or_exit(&client, TRUNCATE_STAGING_SQL, "Clearing the staging table");
-
         let mut inserted = 0usize;
         let mut skipped = 0usize;
         let mut rejected = 0usize;
         let mut new_ids: HashSet<u32> = HashSet::new();
+        let mut batch: Vec<(u32, Metadata)> = Vec::new();
 
         for chunk in epub_names.chunks(WORKS_PER_CHUNK) {
             let epubs: Vec<Option<Vec<u8>>> = chunk
@@ -1006,9 +1184,8 @@ fn main() {
                 .collect();
             rejected += chunk.len() - metas.len();
 
-            let mut body = Vec::new();
-            for meta in &metas {
-                let Some(id) = meta_work_id(meta) else {
+            for meta in metas {
+                let Some(id) = meta_work_id(&meta) else {
                     rejected += 1;
                     continue;
                 };
@@ -1016,26 +1193,16 @@ fn main() {
                     skipped += 1;
                     continue;
                 }
-                body.extend_from_slice(meta_to_row(meta).to_string().as_bytes());
-                body.push(b'\n');
+                batch.push((id, meta));
                 inserted += 1;
             }
 
-            if body.is_empty() {
-                continue;
-            }
-
-            if let Err(e) = client.insert("INSERT INTO works_staging FORMAT JSONEachRow", &body) {
-                eprintln!("ClickHouse insert failed: {e}");
-                process::exit(1);
+            if batch.len() >= WORKS_PER_BATCH {
+                insert_batch(&client, &mut resolver, &mut batch, &mut seen);
             }
         }
 
-        if inserted > 0 {
-            run_sql_or_exit(&client, INSERT_MISSING_TAGS_SQL, "Adding new tags");
-            run_sql_or_exit(&client, PROMOTE_SQL, "Promoting staged rows");
-        }
-        seen.insert_all(new_ids.iter().copied());
+        insert_batch(&client, &mut resolver, &mut batch, &mut seen);
 
         total_inserted += inserted;
         total_skipped += skipped;
