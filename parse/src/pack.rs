@@ -8,7 +8,7 @@ use std::{
     process,
     sync::{
         Arc, Condvar, LazyLock, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         mpsc,
     },
     time::Instant,
@@ -22,6 +22,7 @@ const FRAME_SIZE: usize = 16 << 20;
 const SHARD_TARGET_BYTES: usize = 2 << 30;
 const ZSTD_LEVEL: i32 = 11;
 const MAX_INFLIGHT_FRAMES: usize = 64;
+const REPORT_EVERY: usize = 10_000;
 
 static RE_LANG: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)<dc:language>([^<]+)</dc:language>").unwrap());
@@ -30,6 +31,12 @@ static RE_CREATOR: LazyLock<Regex> =
 static RE_FANDOM: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)<b>(?:Category|Fandom):</b>\s*([^<,\n]+)").unwrap());
 static RE_WORKS_ID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"works/(\d+)").unwrap());
+static RE_SOURCE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?is)<dc:source[^>]*>\s*([^<]+?)\s*</dc:source>").unwrap()
+});
+static RE_TITLE_LINK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?is)<h3[^>]*>\s*<a[^>]+href="[^"]*works/(\d+)"#).unwrap()
+});
 static RE_FILENAME_ID: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)[-_](\d+)\.epub$").unwrap());
 static RE_CHAPTER_FILE: LazyLock<Regex> =
@@ -141,8 +148,10 @@ fn scan_metadata(epub: &[u8], name: &str) -> Option<SortKey> {
                 if let Some(m) = RE_CREATOR.captures(&text) {
                     author = m[1].trim().to_string();
                 }
-                if let Some(m) = RE_WORKS_ID.captures(&text) {
-                    work_id = m[1].parse().unwrap_or(0);
+                if let Some(m) = RE_SOURCE.captures(&text) {
+                    if let Some(w) = RE_WORKS_ID.captures(&m[1]) {
+                        work_id = w[1].parse().unwrap_or(0);
+                    }
                 }
             }
         }
@@ -155,6 +164,11 @@ fn scan_metadata(epub: &[u8], name: &str) -> Option<SortKey> {
                 let text = String::from_utf8_lossy(&data);
                 if let Some(m) = RE_FANDOM.captures(&text) {
                     fandom = html_escape_decode(m[1].trim());
+                }
+                if let Some(m) = RE_TITLE_LINK.captures(&text) {
+                    if let Ok(id) = m[1].parse() {
+                        work_id = id;
+                    }
                 }
             }
         }
@@ -257,6 +271,34 @@ fn with_commas(n: u64) -> String {
     out
 }
 
+fn report_progress(
+    label: &str,
+    unit: &str,
+    done: usize,
+    total: usize,
+    start: Instant,
+    last: &AtomicUsize,
+) {
+    if done % REPORT_EVERY != 0 {
+        return;
+    }
+    let bucket = done / REPORT_EVERY;
+    if last.fetch_max(bucket, Ordering::Relaxed) >= bucket {
+        return;
+    }
+    let elapsed = start.elapsed().as_secs_f64().max(1e-9);
+    let rate = done as f64 / elapsed;
+    let eta = (total.saturating_sub(done)) as f64 / rate / 60.0;
+    eprintln!(
+        "[{label} {}/{}] {:.0} {unit}/sec | elapsed {:.1}m | ETA {:.1}m",
+        with_commas(done as u64),
+        with_commas(total as u64),
+        rate,
+        elapsed / 60.0,
+        eta,
+    );
+}
+
 struct ShardStats {
     start: Instant,
     bytes_out: AtomicU64,
@@ -316,6 +358,23 @@ fn main() {
         process::exit(1);
     }
 
+    let zip_counts: Vec<usize> = zips
+        .iter()
+        .map(|zip_path| {
+            fs::File::open(zip_path)
+                .ok()
+                .and_then(|file| ZipArchive::new(file).ok())
+                .map(|archive| {
+                    archive
+                        .file_names()
+                        .filter(|n| n.to_lowercase().ends_with(".epub"))
+                        .count()
+                })
+                .unwrap_or(0)
+        })
+        .collect();
+    let total_epubs: usize = zip_counts.iter().sum();
+
     cleanup_orphans(&output_dir);
     let mut seen = common::Seen::from_ids(load_packed_ids(&output_dir));
     eprintln!(
@@ -325,6 +384,10 @@ fn main() {
     );
 
     let start = Instant::now();
+    let scan_done = AtomicUsize::new(0);
+    let last_scan_report = AtomicUsize::new(0);
+    let pack_done = AtomicUsize::new(0);
+    let last_pack_report = AtomicUsize::new(0);
     let stats = Arc::new(ShardStats { start, bytes_out: AtomicU64::new(0) });
     let (frame_tx, frame_rx) = mpsc::channel::<FrameMsg>();
     let writer_stats = Arc::clone(&stats);
@@ -470,7 +533,12 @@ fn main() {
 
         let mut keys: Vec<SortKey> = epubs
             .par_iter()
-            .filter_map(|name| read_epub(name).and_then(|epub| scan_metadata(&epub, name)))
+            .filter_map(|name| {
+                let key = read_epub(name).and_then(|epub| scan_metadata(&epub, name));
+                let done = scan_done.fetch_add(1, Ordering::Relaxed) + 1;
+                report_progress("scan", "files", done, total_epubs, start, &last_scan_report);
+                key
+            })
             .collect();
         let scanned = keys.len();
         let failed = total - scanned;
@@ -534,6 +602,8 @@ fn main() {
                 shard_bytes += len;
                 shard_works += 1;
                 packed += 1;
+                let done = pack_done.fetch_add(1, Ordering::Relaxed) + 1;
+                report_progress("pack", "works", done, total_epubs, start, &last_pack_report);
                 if frame_bytes >= FRAME_SIZE {
                     send_frame(&mut frame_works, &mut frame_idx, &mut frame_bytes);
                 }

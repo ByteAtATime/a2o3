@@ -574,6 +574,7 @@ fn meta_to_row(meta: &Metadata) -> serde_json::Value {
 }
 
 const WORKS_PER_CHUNK: usize = 2048;
+const REPORT_EVERY: usize = 10_000;
 
 const CREATE_STAGING_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS works_staging
@@ -884,6 +885,20 @@ fn main() {
         process::exit(1);
     }
 
+    let mut total_epubs = 0usize;
+    for zip_path in &zips {
+        total_epubs += fs::File::open(zip_path)
+            .ok()
+            .and_then(|file| ZipArchive::new(file).ok())
+            .map(|archive| {
+                archive
+                    .file_names()
+                    .filter(|n| n.to_lowercase().ends_with(".epub"))
+                    .count()
+            })
+            .unwrap_or(0);
+    }
+
     let client = ClickHouse::from_env();
     eprintln!("ClickHouse: {}", client.redacted_url());
 
@@ -920,6 +935,8 @@ fn main() {
     let mut total_inserted = 0usize;
     let mut total_skipped = 0usize;
     let mut total_rejected = 0usize;
+    let mut processed = 0usize;
+    let mut last_reported = 0usize;
 
     for zip_path in &zips {
         let zip_start = std::time::Instant::now();
@@ -960,6 +977,22 @@ fn main() {
                     })
                 })
                 .collect();
+
+            processed += chunk.len();
+            if processed / REPORT_EVERY > last_reported / REPORT_EVERY {
+                last_reported = processed;
+                let elapsed = start.elapsed().as_secs_f64().max(1e-9);
+                let rate = processed as f64 / elapsed;
+                let eta = total_epubs.saturating_sub(processed) as f64 / rate / 60.0;
+                eprintln!(
+                    "[insert {}/{}] {:.0} works/sec | elapsed {:.1}m | ETA {:.1}m",
+                    processed,
+                    total_epubs,
+                    rate,
+                    elapsed / 60.0,
+                    eta,
+                );
+            }
 
             let metas: Vec<Metadata> = epubs
                 .par_iter()
