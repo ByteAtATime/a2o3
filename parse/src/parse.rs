@@ -540,6 +540,36 @@ ORDER BY work_id
 
 const TRUNCATE_STAGING_SQL: &str = "TRUNCATE TABLE works_staging";
 
+const INSERT_MISSING_TAGS_SQL: &str = r#"
+INSERT INTO ao3_tags
+WITH (SELECT max(id) FROM ao3_tags) AS base
+SELECT
+    base + row_number() OVER () AS id,
+    type,
+    name,
+    true AS canonical,
+    0 AS merger_id
+FROM (
+    SELECT type, min(raw_name) AS name
+    FROM (
+        SELECT p.1 AS raw_name, p.2 AS type
+        FROM works_staging AS st
+        ARRAY JOIN arrayConcat(
+            arrayMap(x -> (x, 'Fandom'), st.fandoms),
+            arrayMap(x -> (x, 'Relationship'), st.relationships),
+            arrayMap(x -> (x, 'Character'), st.characters),
+            arrayMap(x -> (x, 'Freeform'), st.freeform_tags)
+        ) AS p
+    ) AS names
+    LEFT JOIN (
+        SELECT DISTINCT lower(name) AS name, type
+        FROM ao3_tags
+    ) AS known ON known.name = lower(names.raw_name) AND known.type = names.type
+    WHERE known.name = ''
+    GROUP BY type, lower(raw_name)
+)
+"#;
+
 const PROMOTE_SQL: &str = r#"
 INSERT INTO works
 SELECT
@@ -592,9 +622,10 @@ LEFT JOIN (
         ) AS tag_pair
     ) AS names
     LEFT JOIN (
-        SELECT lower(name) AS name, type, id
-        FROM ao3_tags
-        WHERE canonical AND merger_id = 0
+        SELECT lower(tag.name) AS name, tag.type AS type, target.id AS id
+        FROM ao3_tags AS tag
+        INNER JOIN ao3_tags AS target ON target.id = if(tag.canonical, tag.id, tag.merger_id)
+        WHERE tag.canonical OR tag.merger_id != 0
     ) AS t ON t.name = lower(names.name) AND t.type = names.type
     GROUP BY work_id
 ) AS tag_ids ON tag_ids.work_id = s.work_id
@@ -752,7 +783,9 @@ fn main() {
         }
     }
 
-    eprintln!("Staged {} rows in {:.1}m, promoting...", inserted, start.elapsed().as_secs_f64() / 60.0);
+    eprintln!("Staged {} rows in {:.1}m, adding new tags...", inserted, start.elapsed().as_secs_f64() / 60.0);
+    run_sql_or_exit(&client, INSERT_MISSING_TAGS_SQL, "Adding new tags");
+    eprintln!("Promoting...");
     run_sql_or_exit(&client, PROMOTE_SQL, "Promoting staged rows");
     eprintln!("Inserted {} rows in {:.1}m", inserted, start.elapsed().as_secs_f64() / 60.0);
 }
