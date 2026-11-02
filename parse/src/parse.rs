@@ -236,6 +236,37 @@ fn parse_split_csv(text: &str) -> Vec<String> {
         .collect()
 }
 
+fn is_author_content(el: &scraper::ElementRef<'_>) -> bool {
+    el.ancestors().any(|node| {
+        scraper::ElementRef::wrap(node).is_some_and(|e| {
+            e.value()
+                .classes()
+                .any(|class| class == "userstuff" || class == "notes")
+        })
+    })
+}
+
+fn collect_label_value(label: scraper::ElementRef<'_>) -> String {
+    let mut parts = String::new();
+    let mut curr = label.next_sibling();
+
+    while let Some(node) = curr {
+        if let Some(el) = node.value().as_element() {
+            let tag = el.name();
+            if tag.eq_ignore_ascii_case("br") || tag.eq_ignore_ascii_case("b") {
+                break;
+            }
+        }
+        if let Some(el_ref) = scraper::ElementRef::wrap(node) {
+            parts.push_str(&el_ref.text().collect::<String>());
+        } else if let Some(text) = node.value().as_text() {
+            parts.push_str(text);
+        }
+        curr = node.next_sibling();
+    }
+    parts
+}
+
 fn parse_title_page(html: &str, meta: &mut Metadata) {
     let doc = Html::parse_document(html);
     let a_sel = Selector::parse("a").unwrap();
@@ -272,7 +303,7 @@ fn parse_title_page(html: &str, meta: &mut Metadata) {
     let td_sel = Selector::parse("td").unwrap();
     let b_sel = Selector::parse("b").unwrap();
 
-    if let Some(table) = doc.select(&table_sel).next() {
+    if let Some(table) = doc.select(&table_sel).find(|t| !is_author_content(t)) {
         for tr in table.select(&tr_sel) {
             let tds: Vec<_> = tr.select(&td_sel).collect();
             match tds.len() {
@@ -293,7 +324,10 @@ fn parse_title_page(html: &str, meta: &mut Metadata) {
                             .trim()
                             .trim_end_matches(':')
                             .to_string();
-                        entries.push((label, tds[0].html()));
+                        let value = collect_label_value(b);
+                        if !value.is_empty() {
+                            entries.push((label, value));
+                        }
                     }
                 }
                 _ => {}
@@ -301,31 +335,16 @@ fn parse_title_page(html: &str, meta: &mut Metadata) {
         }
     } else {
         for b in doc.select(&b_sel) {
+            if is_author_content(&b) {
+                continue;
+            }
             let label = b
                 .text()
                 .collect::<String>()
                 .trim()
                 .trim_end_matches(':')
                 .to_string();
-            let mut val_parts = String::new();
-            let mut curr = b.next_sibling();
-
-            while let Some(node) = curr {
-                if node.value().is_element() {
-                    if let Some(el) = node.value().as_element() {
-                        let tag = el.name();
-                        if tag.eq_ignore_ascii_case("br") || tag.eq_ignore_ascii_case("b") {
-                            break;
-                        }
-                    }
-                }
-                if let Some(el_ref) = scraper::ElementRef::wrap(node) {
-                    val_parts.push_str(&el_ref.text().collect::<String>());
-                } else if let Some(text) = node.value().as_text() {
-                    val_parts.push_str(&text.to_string());
-                }
-                curr = node.next_sibling();
-            }
+            let val_parts = collect_label_value(b);
             if !val_parts.is_empty() {
                 entries.push((label, val_parts));
             }
@@ -344,11 +363,17 @@ fn parse_title_page(html: &str, meta: &mut Metadata) {
         let plain = !val_html.contains('<');
 
         if label_l.contains("category") || label_l.contains("fandom") {
-            meta.fandoms = parse_split_csv(&clean);
+            if meta.fandoms.is_empty() {
+                meta.fandoms = parse_split_csv(&clean);
+            }
         } else if label_l.contains("relationship") || label_l.contains("ship") {
-            meta.relationships = parse_split_csv(&clean);
+            if meta.relationships.is_empty() {
+                meta.relationships = parse_split_csv(&clean);
+            }
         } else if label_l.contains("character") {
-            meta.characters = parse_split_csv(&clean);
+            if meta.characters.is_empty() {
+                meta.characters = parse_split_csv(&clean);
+            }
         } else if label_l.contains("genre") {
             for tag in parse_split_csv(&clean) {
                 if AO3_CATEGORIES.contains(&tag.as_str()) {
@@ -360,7 +385,9 @@ fn parse_title_page(html: &str, meta: &mut Metadata) {
                 }
             }
         } else if label_l.contains("warning") {
-            meta.warnings = parse_split_csv(&clean);
+            if meta.warnings.is_empty() {
+                meta.warnings = parse_split_csv(&clean);
+            }
         } else if label_l.contains("rating") {
             meta.rating = Some(clean);
         } else if label_l.contains("status") {
@@ -718,10 +745,11 @@ const RESOLVE_TAGS_SQL: &str = r#"
 SELECT
     lower(tag.name) AS name,
     tag.type AS type,
-    arraySlice(arraySort(groupUniqArray(if(tag.canonical, tag.id, tag.merger_id))), 1, 16) AS ids
+    arraySlice(arraySort(groupUniqArray(
+        if(tag.canonical OR tag.merger_id = 0, tag.id, tag.merger_id)
+    )), 1, 16) AS ids
 FROM ao3_tags AS tag
-WHERE (tag.canonical OR tag.merger_id != 0)
-  AND lower(tag.name) IN (SELECT lname FROM tag_batch)
+WHERE lower(tag.name) IN (SELECT lname FROM tag_batch)
 GROUP BY name, type
 FORMAT JSONEachRow
 "#;
@@ -1231,4 +1259,77 @@ fn main() {
         total_rejected,
         start.elapsed().as_secs_f64() / 60.0,
     );
+}
+
+#[cfg(test)]
+mod title_page_tests {
+    use super::*;
+
+    fn parse(html: &str) -> Metadata {
+        let mut meta = Metadata::default();
+        parse_title_page(html, &mut meta);
+        meta
+    }
+
+    fn page(body: &str) -> String {
+        format!(
+            r#"<html><body class="fff_titlepage">
+<h3><a href="https://archiveofourown.org/works/1">T</a> by <a class="authorlink" href="/u/a">A</a></h3>
+<div>{body}</div></body></html>"#
+        )
+    }
+
+    const META: &str = r#"
+<b>Category:</b> Fandom X<br />
+<b>Characters:</b> Alice, Bob<br />
+<b>Relationships:</b> Alice/Bob<br />
+<b>Genre:</b> Fluff<br />
+<b>Warnings:</b> No Archive Warnings Apply<br />"#;
+
+    #[test]
+    fn parses_plain_title_page() {
+        let meta = parse(&page(META));
+        assert_eq!(meta.characters, ["Alice", "Bob"]);
+        assert_eq!(meta.relationships, ["Alice/Bob"]);
+        assert_eq!(meta.fandoms, ["Fandom X"]);
+    }
+
+    #[test]
+    fn ignores_table_inside_summary() {
+        let meta = parse(&page(&format!(
+            r#"{META}
+<b>Summary:</b> <div class="userstuff"><p>Text.</p>
+<table><tbody><tr><td>unrelated</td></tr></tbody></table></div><br />"#
+        )));
+        assert_eq!(meta.characters, ["Alice", "Bob"]);
+        assert_eq!(meta.fandoms, ["Fandom X"]);
+    }
+
+    #[test]
+    fn ignores_character_label_inside_summary() {
+        let meta = parse(&page(&format!(
+            r#"{META}
+<b>Summary:</b> <div class="userstuff"><p><b>Characters:</b> Mallory, Eve. <b>Pairings:</b> Mallory/Eve</p></div><br />"#
+        )));
+        assert_eq!(meta.characters, ["Alice", "Bob"]);
+        assert_eq!(meta.relationships, ["Alice/Bob"]);
+    }
+
+    #[test]
+    fn does_not_match_character_deaths_as_characters() {
+        let meta = parse(&page(&format!(
+            r#"{META}
+<b>Summary:</b> <div class="userstuff"><p>Dark. <b>Warnings: Child Abuse and Character Deaths.</b> Prompt: Alice, Bob</p></div><br />"#
+        )));
+        assert_eq!(meta.characters, ["Alice", "Bob"]);
+        assert_eq!(meta.warnings, ["No Archive Warnings Apply"]);
+    }
+
+    #[test]
+    fn strips_label_from_single_cell_value() {
+        let meta = parse(
+            r#"<html><body><table><tr><td><b>Characters:</b> Alice, Bob<br /></td></tr></table></body></html>"#,
+        );
+        assert_eq!(meta.characters, ["Alice", "Bob"]);
+    }
 }
