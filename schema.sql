@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS works
 
     -- chapters
     chapter_names    Array(String) CODEC(ZSTD(19)),
+    chapter_ids      Array(Nullable(UInt32)) CODEC(ZSTD(6)),
     chapter_head_notes Array(String) CODEC(ZSTD(19)),
     chapter_foot_notes Array(String) CODEC(ZSTD(19)),
 

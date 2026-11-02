@@ -45,6 +45,8 @@ static RE_CHAPTER_FILE: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new(r"(?i).*/(file|chapter)\d+(_u\d+)?\.x?html$").unwrap());
 static RE_WORKS_ID: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new(r"/works/(\d+)").unwrap());
+static RE_CHAPTER_ID: std::sync::LazyLock<Regex> =
+    std::sync::LazyLock::new(|| Regex::new(r"/chapters/(\d+)").unwrap());
 static RE_SERIES_ID: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new(r"/series/(\d+)").unwrap());
 static RE_COLLECTION_ID: std::sync::LazyLock<Regex> =
@@ -86,6 +88,8 @@ struct Collection {
 struct ChapterInfo {
     title: Option<String>,
     url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     date: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -564,6 +568,8 @@ fn parse_chapter(html: &[u8]) -> ChapterInfo {
     let html_str = String::from_utf8_lossy(html);
     (info.head_notes, info.foot_notes) = parse_notes(&html_str);
 
+    info.id = id_from_url(&RE_CHAPTER_ID, info.url.as_deref());
+
     if info.title.is_none() {
         if let Some(caps) = RE_CHAPTER_HEADING.captures(&html_str) {
             let raw = caps
@@ -663,6 +669,7 @@ fn meta_to_row(meta: &Metadata, tags: &TagResolver) -> serde_json::Value {
         .iter()
         .filter_map(|c| c.title.as_deref())
         .collect();
+    let chapter_ids: Vec<Option<u64>> = meta.chapters.iter().map(|c| c.id).collect();
     let chapter_head_notes: Vec<&str> = meta
         .chapters
         .iter()
@@ -709,6 +716,7 @@ fn meta_to_row(meta: &Metadata, tags: &TagResolver) -> serde_json::Value {
         "collection_ids": collection_ids,
         "summary": meta.summary,
         "chapter_names": chapter_names,
+        "chapter_ids": chapter_ids,
         "chapter_head_notes": chapter_head_notes,
         "chapter_foot_notes": chapter_foot_notes,
     })

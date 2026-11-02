@@ -33,6 +33,7 @@ const workDetailFields = {
   series_ids: z.array(z.number().int()),
   collection_ids: z.array(z.string()),
   chapter_names: z.array(z.string()),
+  chapter_ids: z.array(z.number().int().nullable()),
   summary: z.string().nullable(),
 };
 
@@ -92,6 +93,7 @@ const workPageQuery = (ids: string, order: string): string => `
     p.collections AS collections,
     p.collection_ids AS collection_ids,
     p.chapter_names AS chapter_names,
+    p.chapter_ids AS chapter_ids,
     p.summary AS summary,
     ifNull(g.fandoms, []) AS fandoms,
     ifNull(g.relationships, []) AS relationships,
