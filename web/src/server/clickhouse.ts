@@ -18,7 +18,6 @@ const workSummaryFields = {
   chapters_total: z.number().int().nullable(),
   published_date: z.string(),
   updated_date: z.string().nullable(),
-  hits: nullableCount,
   summary: z.string().nullable(),
 };
 
@@ -28,9 +27,12 @@ const workDetailFields = {
   characters: z.array(z.string()),
   freeform_tags: z.array(z.string()),
   comments: nullableCount,
-  bookmarks: nullableCount,
   series_names: z.array(z.string()),
   collections: z.array(z.string()),
+  author_urls: z.array(z.string()),
+  series_ids: z.array(z.number().int()),
+  collection_ids: z.array(z.string()),
+  chapter_names: z.array(z.string()),
   summary: z.string().nullable(),
 };
 
@@ -72,6 +74,7 @@ const workPageQuery = (ids: string, order: string): string => `
     p.work_id AS work_id,
     p.title AS title,
     p.authors AS authors,
+    p.author_urls AS author_urls,
     p.rating AS rating,
     p.warnings AS warnings,
     p.category AS category,
@@ -84,10 +87,11 @@ const workPageQuery = (ids: string, order: string): string => `
     p.updated_date AS updated_date,
     p.kudos AS kudos,
     p.comments AS comments,
-    p.bookmarks AS bookmarks,
-    p.hits AS hits,
     p.series_names AS series_names,
+    p.series_ids AS series_ids,
     p.collections AS collections,
+    p.collection_ids AS collection_ids,
+    p.chapter_names AS chapter_names,
     p.summary AS summary,
     ifNull(g.fandoms, []) AS fandoms,
     ifNull(g.relationships, []) AS relationships,

@@ -4,6 +4,7 @@ CREATE TABLE IF NOT EXISTS works
     work_id          UInt32 CODEC(Delta, ZSTD(6)),
     title            String CODEC(ZSTD(19)),
     authors          Array(LowCardinality(String)) CODEC(ZSTD(19)),
+    author_urls      Array(String) CODEC(ZSTD(6)),
 
     -- categories & stuff
     rating           LowCardinality(String) CODEC(ZSTD(6)),
@@ -30,16 +31,19 @@ CREATE TABLE IF NOT EXISTS works
     -- stats
     kudos            Nullable(UInt32) CODEC(T64, ZSTD(6)),
     comments         Nullable(UInt32) CODEC(T64, ZSTD(6)),
-    bookmarks        Nullable(UInt32) CODEC(T64, ZSTD(6)),
-    hits             Nullable(UInt32) CODEC(T64, ZSTD(6)),
 
     -- series
     series_names     Array(LowCardinality(String)) CODEC(ZSTD(6)),
     series_indexes   Array(UInt16) CODEC(T64, ZSTD(6)),
+    series_ids       Array(UInt32) CODEC(ZSTD(6)),
 
     collections      Array(LowCardinality(String)) CODEC(ZSTD(6)),
+    collection_ids   Array(String) CODEC(ZSTD(6)),
 
     summary          Nullable(String) CODEC(ZSTD(19)),
+
+    -- chapters
+    chapter_names    Array(String) CODEC(ZSTD(19)),
 
     -- notes
     chapter_notes    Array(String) CODEC(ZSTD(19)),

@@ -41,6 +41,10 @@ static RE_CHAPTER_FILE: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new(r"(?i).*/(file|chapter)\d+(_u\d+)?\.x?html$").unwrap());
 static RE_WORKS_ID: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new(r"/works/(\d+)").unwrap());
+static RE_SERIES_ID: std::sync::LazyLock<Regex> =
+    std::sync::LazyLock::new(|| Regex::new(r"/series/(\d+)").unwrap());
+static RE_COLLECTION_ID: std::sync::LazyLock<Regex> =
+    std::sync::LazyLock::new(|| Regex::new(r"/collections/([^/?#]+)").unwrap());
 static RE_SERIES_IDX: std::sync::LazyLock<Regex> =
     std::sync::LazyLock::new(|| Regex::new(r"\[(\d+)\]|Part\s+(\d+)").unwrap());
 static RE_CHAPTER_HEADING: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
@@ -60,13 +64,13 @@ struct Author {
 struct Series {
     name: String,
     index: Option<u64>,
-    url: Option<String>,
+    id: Option<u64>,
 }
 
 #[derive(Serialize, Default)]
 struct Collection {
     name: String,
-    url: Option<String>,
+    id: Option<String>,
 }
 
 #[derive(Serialize, Default)]
@@ -91,10 +95,6 @@ struct Dates {
 struct Stats {
     #[serde(skip_serializing_if = "Option::is_none")]
     kudos: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    hits: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    bookmarks: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     comments: Option<u64>,
 }
@@ -128,6 +128,18 @@ struct Metadata {
 fn to_int(val: &str) -> Option<u64> {
     let clean: String = val.chars().filter(|c| c.is_ascii_digit()).collect();
     (!clean.is_empty()).then(|| clean.parse().ok()).flatten()
+}
+
+fn id_from_url(re: &Regex, url: Option<&str>) -> Option<u64> {
+    re.captures(url?).and_then(|c| c[1].parse().ok())
+}
+
+fn slug_from_url(re: &Regex, url: Option<&str>) -> Option<String> {
+    re.captures(url?).map(|c| c[1].to_string())
+}
+
+fn series_id_from_url(url: Option<&str>) -> Option<u64> {
+    id_from_url(&RE_SERIES_ID, url)
 }
 
 fn read_zip_entry<R: Read + Seek>(
@@ -213,17 +225,15 @@ fn parse_title_page(html: &str, meta: &mut Metadata) {
             let is_author = link.select(&author_sel).next().is_some()
                 || link.value().classes().any(|c| c == "authorlink");
             let name = link.text().collect::<String>().trim().to_string();
+            let href = link.value().attr("href");
 
             if is_author {
                 if !name.is_empty() && !meta.authors.iter().any(|a| a.name == name) {
-                    meta.authors.push(Author {
-                        url: link.value().attr("href").map(String::from),
-                        name,
-                    });
+                    meta.authors.push(Author { name, url: href.map(String::from) });
                 }
             } else {
                 if !name.is_empty() { meta.title = Some(name); }
-                if let Some(href) = link.value().attr("href") { meta.url = Some(href.to_string()); }
+                if let Some(href) = href { meta.url = Some(href.to_string()); }
             }
         }
     }
@@ -283,6 +293,7 @@ fn parse_title_page(html: &str, meta: &mut Metadata) {
         let label_l = label.to_lowercase();
         let val_doc = Html::parse_fragment(val_html);
         let clean = val_doc.root_element().text().collect::<String>().trim().to_string();
+        let plain = !val_html.contains('<');
 
         if label_l.contains("category") || label_l.contains("fandom") {
             meta.fandoms = parse_split_csv(&clean);
@@ -324,35 +335,54 @@ fn parse_title_page(html: &str, meta: &mut Metadata) {
         } else if label_l.contains("summary") || label_l.contains("description") {
             meta.summary = Some(clean);
         } else if label_l.contains("series") {
+            if label_l.contains("url") {
+                if let Some(id) = series_id_from_url(Some(clean.as_str())) {
+                    for s in meta.series.iter_mut().filter(|s| s.id.is_none()) {
+                        s.id = Some(id);
+                    }
+                }
+                continue;
+            }
+            let idx = RE_SERIES_IDX.captures(&clean).and_then(|c| {
+                c.get(1).or_else(|| c.get(2)).and_then(|m| m.as_str().parse().ok())
+            });
+            let text_id = series_id_from_url(Some(clean.as_str()));
+            let mut push = |s_name: &str, s_id: Option<u64>| {
+                if !s_name.is_empty() && !meta.series.iter().any(|s| s.name == s_name) {
+                    meta.series.push(Series { name: s_name.to_string(), index: idx, id: s_id });
+                }
+            };
             for a_link in val_doc.select(&a_sel) {
                 let s_name = a_link.text().collect::<String>().trim().to_string();
-                let s_url = a_link.value().attr("href").map(String::from);
-                let idx = RE_SERIES_IDX.captures(&clean).and_then(|c| {
-                    c.get(1).or_else(|| c.get(2)).and_then(|m| m.as_str().parse().ok())
-                });
-                if !s_name.is_empty() && !meta.series.iter().any(|s| s.name == s_name) {
-                    meta.series.push(Series { name: s_name, index: idx, url: s_url });
+                push(&s_name, series_id_from_url(a_link.value().attr("href")));
+            }
+            if plain {
+                for s_name in clean.split(',').map(|s| RE_SERIES_IDX.replace(s, "").trim().to_string()) {
+                    push(&s_name, text_id);
                 }
             }
         } else if label_l.contains("collection") {
+            let mut push = |c_name: &str, c_id: Option<String>| {
+                if !c_name.is_empty() && !meta.collections.iter().any(|c| c.name == c_name) {
+                    meta.collections.push(Collection { name: c_name.to_string(), id: c_id });
+                }
+            };
             for a_link in val_doc.select(&a_sel) {
                 let name = a_link.text().collect::<String>().trim().to_string();
-                if !name.is_empty() {
-                    meta.collections.push(Collection {
-                        name,
-                        url: a_link.value().attr("href").map(String::from),
-                    });
+                push(&name, slug_from_url(&RE_COLLECTION_ID, a_link.value().attr("href")));
+            }
+            if plain {
+                for name in parse_split_csv(&clean) {
+                    push(&name, None);
                 }
             }
-        } else if let Some(field) = ["kudos", "hits", "bookmarks", "comments"]
+        } else if let Some(field) = ["kudos", "comments"]
             .iter()
             .find(|&&f| label_l == f)
         {
             let v = to_int(&clean);
             match *field {
                 "kudos" => meta.stats.kudos = v,
-                "hits" => meta.stats.hits = v,
-                "bookmarks" => meta.stats.bookmarks = v,
                 "comments" => meta.stats.comments = v,
                 _ => unreachable!(),
             }
@@ -464,7 +494,11 @@ fn meta_to_row(meta: &Metadata) -> serde_json::Value {
     let authors: Vec<&str> = meta.authors.iter().map(|a| a.name.as_str()).collect();
     let series_names: Vec<&str> = meta.series.iter().map(|s| s.name.as_str()).collect();
     let series_indexes: Vec<u64> = meta.series.iter().map(|s| s.index.unwrap_or(0)).collect();
+    let author_urls: Vec<&str> = meta.authors.iter().filter_map(|a| a.url.as_deref()).collect();
+    let series_ids: Vec<u64> = meta.series.iter().map(|s| s.id.unwrap_or(0)).collect();
     let collections: Vec<&str> = meta.collections.iter().map(|c| c.name.as_str()).collect();
+    let collection_ids: Vec<&str> = meta.collections.iter().filter_map(|c| c.id.as_deref()).collect();
+    let chapter_names: Vec<&str> = meta.chapters.iter().filter_map(|c| c.title.as_deref()).collect();
     let chapters_count = meta.chapters_count.unwrap_or(meta.chapters.len() as u64);
     let is_completed = meta
         .status
@@ -475,6 +509,7 @@ fn meta_to_row(meta: &Metadata) -> serde_json::Value {
         "work_id": work_id,
         "title": meta.title.as_deref().unwrap_or(""),
         "authors": authors,
+        "author_urls": author_urls,
         "rating": meta.rating.as_deref().unwrap_or("Not Rated"),
         "warnings": meta.warnings,
         "category": meta.category,
@@ -493,12 +528,13 @@ fn meta_to_row(meta: &Metadata) -> serde_json::Value {
         }),
         "kudos": meta.stats.kudos,
         "comments": meta.stats.comments,
-        "bookmarks": meta.stats.bookmarks,
-        "hits": meta.stats.hits,
         "series_names": series_names,
         "series_indexes": series_indexes,
+        "series_ids": series_ids,
         "collections": collections,
+        "collection_ids": collection_ids,
         "summary": meta.summary,
+        "chapter_names": chapter_names,
     })
 }
 
@@ -511,6 +547,7 @@ CREATE TABLE IF NOT EXISTS works_staging
     work_id          UInt32,
     title            String,
     authors          Array(String),
+    author_urls      Array(String),
     rating           String,
     warnings         Array(String),
     category         Array(String),
@@ -527,18 +564,61 @@ CREATE TABLE IF NOT EXISTS works_staging
     updated_date     Nullable(Date),
     kudos            Nullable(UInt32),
     comments         Nullable(UInt32),
-    bookmarks        Nullable(UInt32),
-    hits             Nullable(UInt32),
     series_names     Array(String),
     series_indexes   Array(UInt16),
+    series_ids       Array(UInt32),
     collections      Array(String),
-    summary          Nullable(String)
+    collection_ids   Array(String),
+    summary          Nullable(String),
+    chapter_names    Array(String)
 )
 ENGINE = MergeTree
 ORDER BY work_id
 "#;
 
 const TRUNCATE_STAGING_SQL: &str = "TRUNCATE TABLE works_staging";
+
+const ID_COLUMNS: &[(&str, &str)] = &[
+    ("author_urls", "Array(String) AFTER authors"),
+    ("series_ids", "Array(UInt32) AFTER series_indexes"),
+    ("collection_ids", "Array(String) AFTER collections"),
+    ("chapter_names", "Array(String) AFTER summary"),
+];
+
+fn recreate_staging(client: &ClickHouse) {
+    let new_table = CREATE_STAGING_SQL.replace("works_staging", "works_staging_new");
+    run_sql_or_exit(client, &new_table, "Creating works_staging_new");
+
+    let columns = staging_columns(client).unwrap_or_else(|e| {
+        eprintln!("Reading the staging columns failed: {e}");
+        process::exit(1);
+    });
+    let id_names: Vec<&str> = ID_COLUMNS.iter().map(|(column, _)| *column).collect();
+    let (unnamed, named) = columns.split_at(columns.len().saturating_sub(id_names.len()));
+    let mut select = unnamed.to_vec();
+    if named == id_names.as_slice() {
+        select.extend(id_names.iter().map(|c| c.to_string()));
+    }
+
+    run_sql_or_exit(
+        client,
+        &format!("INSERT INTO works_staging_new ({}) SELECT {} FROM works_staging", select.join(", "), select.join(", ")),
+        "Copying staged rows",
+    );
+    run_sql_or_exit(client, "EXCHANGE TABLES works_staging AND works_staging_new", "Swapping staging tables");
+    run_sql_or_exit(client, "DROP TABLE works_staging_new", "Dropping the old staging table");
+}
+
+fn staging_columns(client: &ClickHouse) -> Result<Vec<String>, String> {
+    client.query(
+        "SELECT name FROM system.columns WHERE database = currentDatabase() AND table = 'works_staging' ORDER BY position",
+    ).map(|found| found.lines().map(str::to_string).collect())
+}
+
+fn staging_has_id_columns(client: &ClickHouse) -> Result<bool, String> {
+    let columns = staging_columns(client)?;
+    Ok(ID_COLUMNS.iter().all(|(column, _)| columns.iter().any(|c| c == column)))
+}
 
 const INSERT_MISSING_TAGS_SQL: &str = r#"
 INSERT INTO ao3_tags
@@ -576,6 +656,7 @@ SELECT
     s.work_id,
     s.title,
     s.authors,
+    s.author_urls,
     s.rating,
     s.warnings,
     s.category,
@@ -592,12 +673,13 @@ SELECT
     s.updated_date,
     s.kudos,
     s.comments,
-    s.bookmarks,
-    s.hits,
     s.series_names,
     s.series_indexes,
+    s.series_ids,
     s.collections,
+    s.collection_ids,
     s.summary,
+    s.chapter_names,
     CAST([] AS Array(String)) AS chapter_notes,
     CAST(NULL AS Nullable(String)) AS end_notes
 FROM works_staging AS s
@@ -714,6 +796,14 @@ impl ClickHouse {
         self.check(self.request(sql)?.send(&[]))
     }
 
+    fn query(&self, sql: &str) -> Result<String, String> {
+        let response = self.request(sql)?.send(&[]).map_err(|e| format!("Could not reach {}: {e}", self.url))?;
+        if !response.status().is_success() {
+            return self.check(Ok(response)).map(|()| String::new());
+        }
+        response.into_body().read_to_string().map_err(|e| format!("Could not read the response: {e}"))
+    }
+
     fn insert(&self, sql: &str, body: &[u8]) -> Result<(), String> {
         self.check(self.request(sql)?.send(body))
     }
@@ -753,8 +843,28 @@ fn main() {
     let client = ClickHouse::from_env();
     eprintln!("ClickHouse: {}", client.redacted_url());
 
+    for (column, definition) in ID_COLUMNS {
+        client.execute(&format!("ALTER TABLE works ADD COLUMN IF NOT EXISTS {column} {definition}"))
+            .unwrap_or_else(|e| {
+                eprintln!("Verifying the works table failed: {e}");
+                process::exit(1);
+            });
+    }
+
     run_sql_or_exit(&client, CREATE_STAGING_SQL, "Creating the staging table");
     run_sql_or_exit(&client, TRUNCATE_STAGING_SQL, "Clearing the staging table");
+    run_sql_or_exit(&client, "DROP TABLE IF EXISTS works_staging_new", "Dropping a leftover works_staging_new");
+    match staging_has_id_columns(&client) {
+        Ok(true) => {}
+        Ok(false) => {
+            eprintln!("Rebuilding works_staging with the id columns...");
+            recreate_staging(&client);
+        }
+        Err(e) => {
+            eprintln!("Checking the staging table failed: {e}");
+            process::exit(1);
+        }
+    }
 
     let start = std::time::Instant::now();
     let mut inserted = 0usize;
@@ -788,10 +898,7 @@ fn main() {
             body.push(b'\n');
         }
 
-        if let Err(e) = client.insert(
-            "INSERT INTO works_staging FORMAT JSONEachRow",
-            &body,
-        ) {
+        if let Err(e) = client.insert("INSERT INTO works_staging FORMAT JSONEachRow", &body) {
             eprintln!("ClickHouse insert failed: {e}");
             process::exit(1);
         }

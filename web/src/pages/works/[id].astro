@@ -50,8 +50,6 @@ const details = [
     { label: "Chapters", value: work.chapters_count },
     { label: "Kudos", value: work.kudos },
     { label: "Comments", value: work.comments },
-    { label: "Bookmarks", value: work.bookmarks },
-    { label: "Hits", value: work.hits },
   ].flatMap(({ label, value }) =>
     value === null ? [] : [{ label, value: number.format(value) }],
   ),
