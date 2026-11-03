@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS works
     chapter_head_notes Array(String) CODEC(ZSTD(19)),
     chapter_foot_notes Array(String) CODEC(ZSTD(19)),
 
+    removed          Bool DEFAULT false,
+
     INDEX idx_language     language            TYPE set(100) GRANULARITY 1,
     INDEX idx_rating       rating              TYPE set(25) GRANULARITY 1,
     INDEX idx_is_completed is_completed        TYPE set(2) GRANULARITY 1,

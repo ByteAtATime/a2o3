@@ -6,6 +6,7 @@ import RequiredTags from "../../components/RequiredTags.astro";
 import { cleanSummary, parseTag } from "../../lib/tags";
 import { findWork } from "../../server/clickhouse";
 import { readWorkText } from "../../server/shardReader";
+import { turnstileSiteKey } from "../../server/turnstile";
 
 const workId = Number(Astro.params.id);
 const work =
@@ -130,6 +131,30 @@ const details = [
           </dl>
         </section>
 
+        <section class="space-y-3 text-sm">
+          <form
+            method="post"
+            action={`/works/${work.work_id}/remove`}
+            class="space-y-3"
+          >
+            <div
+              data-turnstile
+              data-sitekey={turnstileSiteKey()}
+              class="empty:hidden"
+            ></div>
+            <p class="text-muted-foreground">
+              If this is your work and you don't want it here, you can{" "}
+              <button
+                type="submit"
+                class="underline text-foreground cursor-pointer"
+              >
+                remove this work
+              </button>
+              .
+            </p>
+          </form>
+        </section>
+
         {summary && (
           <blockquote class="border-l-4 border-[#900]/40 pl-4 whitespace-pre-line text-foreground/90">
             {summary}
@@ -144,5 +169,53 @@ const details = [
         )}
       </article>
     </main>
+    <script>
+      type Turnstile = {
+        render: (
+          container: HTMLElement,
+          options: { sitekey: string; callback: () => void },
+        ) => string;
+      };
+
+      declare global {
+        interface Window {
+          turnstile?: Turnstile;
+        }
+      }
+
+      const loadTurnstile = (): Promise<Turnstile> =>
+        new Promise((resolve, reject) => {
+          if (window.turnstile) return resolve(window.turnstile);
+          const script = document.createElement("script");
+          script.src =
+            "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
+          script.addEventListener("load", () =>
+            window.turnstile ? resolve(window.turnstile) : reject(),
+          );
+          script.addEventListener("error", () => reject());
+          document.head.append(script);
+        });
+
+      const container = document.querySelector<HTMLElement>("[data-turnstile]");
+      const form = container?.closest("form");
+      let started = false;
+
+      if (container && form) {
+        form.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          if (started) return;
+          started = true;
+          try {
+            const turnstile = await loadTurnstile();
+            turnstile.render(container, {
+              sitekey: container.dataset.sitekey ?? "",
+              callback: () => form.submit(),
+            });
+          } catch {
+            started = false;
+          }
+        });
+      }
+    </script>
   </body>
 </html>

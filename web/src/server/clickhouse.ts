@@ -45,7 +45,7 @@ export type WorkDetail = z.infer<typeof workDetailSchema>;
 
 const workPageQuery = (ids: string, order: string): string => `
   WITH page AS (
-    SELECT * FROM works WHERE work_id IN (${ids})
+    SELECT * FROM works WHERE work_id IN (${ids}) AND NOT removed
   ),
   exploded AS (
     SELECT work_id, tupleElement(t, 1) AS col, tupleElement(t, 2) AS id
@@ -107,13 +107,13 @@ const workPageQuery = (ids: string, order: string): string => `
 const listLimit = 200;
 
 const clickHouseUrl = (): string =>
-  process.env.CH_URL ?? "http://localhost:8123";
+  import.meta.env.CH_URL ?? "http://localhost:8123";
 
 const clickHouseHeaders = (): Record<string, string> => {
   const headers: Record<string, string> = {};
-  const user = process.env.CH_USER;
-  const password = process.env.CH_PASSWORD;
-  const database = process.env.CH_DATABASE;
+  const user = import.meta.env.CH_USER;
+  const password = import.meta.env.CH_PASSWORD;
+  const database = import.meta.env.CH_DATABASE;
   if (user) headers["X-ClickHouse-User"] = user;
   if (password) headers["X-ClickHouse-Key"] = password;
   if (database) headers["X-ClickHouse-Database"] = database;
@@ -135,6 +135,19 @@ const runQuery = async (
     .object({ data: z.array(z.unknown()) })
     .parse(await response.json());
   return body.data;
+};
+
+export const removeWork = async (workId: number): Promise<void> => {
+  const url = new URL(clickHouseUrl());
+  url.searchParams.set("param_id", String(workId));
+  url.searchParams.set("mutations_sync", "1");
+  const response = await fetch(url, {
+    method: "POST",
+    headers: clickHouseHeaders(),
+    body: "ALTER TABLE works UPDATE removed = true WHERE work_id = {id:UInt32}",
+  });
+  if (!response.ok)
+    throw new Error(`ClickHouse ${response.status}: ${await response.text()}`);
 };
 
 const paramBuilder = () => {
@@ -323,7 +336,7 @@ const buildWhere = (
   params: SearchParams,
 ): { sql: string; params: Record<string, string> } => {
   const b = paramBuilder();
-  const conditions: string[] = [];
+  const conditions: string[] = ["NOT removed"];
 
   if (params.query) {
     const q = b.bind(likePattern(params.query));
@@ -412,7 +425,7 @@ const buildWhere = (
     conditions.push(`has(category, ${b.bind(category)})`);
 
   return {
-    sql: conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "",
+    sql: `WHERE ${conditions.join(" AND ")}`,
     params: b.params(),
   };
 };
@@ -476,7 +489,7 @@ export const searchOptions = {
 
 export const listWorks = async (): Promise<WorkDetail[]> => {
   const idRows = await runQuery(
-    `SELECT work_id FROM works ORDER BY work_id DESC LIMIT ${listLimit}`,
+    `SELECT work_id FROM works WHERE NOT removed ORDER BY work_id DESC LIMIT ${listLimit}`,
   );
   const ids = z
     .array(z.number().int())
@@ -501,7 +514,7 @@ let languagesCache: Promise<string[]> | undefined;
 
 export const listLanguages = async (): Promise<string[]> => {
   languagesCache ??= runQuery(
-    "SELECT DISTINCT language FROM works WHERE language != '' ORDER BY language",
+    "SELECT DISTINCT language FROM works WHERE language != '' AND NOT removed ORDER BY language",
   ).then((rows) =>
     rows.map((row) => z.object({ language: z.string() }).parse(row).language),
   );
