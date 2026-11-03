@@ -1,10 +1,11 @@
 ---
 import "../styles/global.css";
-import { listWorks } from "../server/clickhouse";
-import { cleanSummary } from "../lib/tags";
-import WorkBlurb from "../components/WorkBlurb.astro";
 
-const works = await listWorks();
+const email = "hi@byteatatime.dev";
+const datasetUrl =
+  "https://www.reddit.com/r/DHExchange/comments/1ob5f6g/share_an_archive_of_ao3_stories_through_sept_2025/";
+const removalUrl =
+  "https://www.reddit.com/r/DeletedFanfiction/comments/1koycrz/request_please_post_here_if_you_dont_want_your/";
 ---
 
 <!doctype html>
@@ -12,27 +13,40 @@ const works = await listWorks();
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width" />
-    <title>Works</title>
+    <title>A²O3</title>
   </head>
-  <body>
-    <main class="mx-auto max-w-3xl px-2 py-4">
-      <div class="mb-4 flex items-center justify-between">
-        <h1 class="text-xl font-semibold">Works</h1>
-        <a href="/works/search" class="text-sm text-blue-700 underline">
-          Work Search
-        </a>
-      </div>
-      <ul>
-        {works.map((work, i) => (
-          <>
-            <WorkBlurb work={work} summary={cleanSummary(work.summary ?? "")} />
-
-            {i < works.length - 1 && (
-              <li class="border-b border-slate-300" aria-hidden="true"></li>
-            )}
-          </>
-        ))}
-      </ul>
+  <body class="bg-stone-50">
+    <main
+      class="prose prose-stone prose-a:text-rose-700 prose-a:decoration-rose-300 prose-a:underline-offset-2 hover:prose-a:decoration-rose-700 mx-auto px-4 py-12 sm:py-20"
+    >
+      <h1>Hi, welcome to A²O3!</h1>
+      <p><strong>This site is not affiliated with AO3 or the OTW.</strong>
+      </p>
+      <p>
+        Everything here comes from a <a href={datasetUrl}
+          >public torrent of AO3 stories</a
+        >.
+      </p>
+      <p>
+        <strong>None of these works are mine.</strong> All the credit belongs to
+        the authors who wrote them, and I don't earn any money from this.
+      </p>
+      <p>
+        I've turned on all of Cloudflare's anti-AI features, and I've removed
+        everything from the authors listed on <a href={removalUrl}
+          >this thread</a
+        >.
+      </p>
+      <p>
+        If something you wrote is here and you don't want it to be, please email me at <a
+          href={`mailto:${email}`}>{email}</a
+        > and I'll take it down.
+      </p>
+      <p>
+        I'm just a fan of AO3, and I built this in the hopes that it can help
+        someone!
+      </p>
+      <p><a href="/works/search">Work Search</a></p>
     </main>
   </body>
 </html>
